@@ -4,6 +4,7 @@
 use crate::config::Config;
 use crate::errors::AudioError;
 use crate::events::{ControlEvent, Timestamp};
+use crate::fanout;
 use crate::source::{MicSource, PcmFrame};
 use crate::state::{MuteReason, MuteState, Shutdown};
 
@@ -14,7 +15,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 /// Bounded ring-buffer capacity in i16 samples (~5 s of 16 kHz mono).
-const RING_CAPACITY: usize = 16_000 * 5;
+pub const RING_CAPACITY: usize = 16_000 * 5;
 /// Channel depth for the source -> daemon hand-off.
 const SOURCE_CHANNEL_DEPTH: usize = 64;
 
@@ -122,10 +123,24 @@ impl<S: MicSource> Daemon<S> {
             mpsc::channel::<PcmFrame>(SOURCE_CHANNEL_DEPTH);
         let source_task = tokio::spawn(async move { source.run(frame_tx).await });
 
-        // 3. Bounded ring buffer for downstream consumers (wake/VAD
-        //    and socket fanout land here in later iterations).
+        // 3. Bounded ring buffer reserved for in-process wake/VAD
+        //    consumers (iter-4+); UDS socket fanout uses the broadcast
+        //    channel below instead so slow subscribers can't stall the
+        //    capture loop.
         let rb = HeapRb::<i16>::new(RING_CAPACITY);
         let (mut producer, mut consumer) = rb.split();
+
+        // 3a. Broadcast channel + UDS fanout server (PRD §2.3 step 3, AC7).
+        let (bcast_tx, bcast_seed) = fanout::channel();
+        drop(bcast_seed);
+        let fanout_socket = config.mic_socket.clone();
+        let fanout_shutdown = shutdown.clone();
+        let fanout_bcast = bcast_tx.clone();
+        let fanout_task = tokio::spawn(async move {
+            if let Err(e) = fanout::run(fanout_socket, fanout_bcast, fanout_shutdown).await {
+                warn!(error = %e, "fanout listener exited with error");
+            }
+        });
 
         // 4. Spawn the control-subscriber loop.
         let control_mute = mute.clone();
@@ -178,9 +193,14 @@ impl<S: MicSource> Daemon<S> {
             let n_u64 = u64::try_from(n).unwrap_or(u64::MAX);
             total_samples = total_samples.saturating_add(n_u64);
 
-            // Drain whatever the (yet-to-arrive) downstream consumers
-            // would read so the ring doesn't fill in this skeleton.
-            // The drain becomes the wake/VAD/socket fanout in iter-3.
+            // Fanout to UDS subscribers. `SendError` only means "no
+            // active subscribers right now," which is the steady state
+            // when nothing is listening — ignore.
+            let _ = bcast_tx.send(frame);
+
+            // Drain the ring so it doesn't fill until wake/VAD (iter-4+)
+            // attach as the real consumer. Lives separately from the
+            // broadcast fanout above.
             let avail = consumer.occupied_len();
             if avail > 0 {
                 let _ = drain_ring(&mut consumer, avail);
@@ -191,8 +211,10 @@ impl<S: MicSource> Daemon<S> {
         //    capture loop owns a socket / device handle that may not
         //    interrupt cleanly. Drop the channel to signal it.
         drop(frame_rx);
+        drop(bcast_tx);
         let _ = signal_task.await;
         let _ = control_task.await;
+        let _ = fanout_task.await;
         let _ = source_task.await;
 
         // 8. Best-effort publish of shutdown notice (cosmetic; the

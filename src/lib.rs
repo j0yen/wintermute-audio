@@ -1,12 +1,12 @@
 //! wintermute-audio — mic → AEC/NS → wake/VAD → agorabus events.
 //!
-//! This iteration (iter-2) wires the daemon skeleton:
+//! Through iter-3 the daemon skeleton wires:
 //!
 //! * Strongly-typed event vocabulary for the topics in PRD §2.3.
 //! * A `MicSource` trait abstracting the capture device so `PipeWire`,
 //!   file replay, and tests can all drive the pipeline uniformly.
-//! * A bounded ring buffer fanout (PCM frames in, fan-out to wake/VAD/
-//!   socket consumers in later iterations).
+//! * A UDS PCM fanout (broadcast channel + per-connection writer task)
+//!   serving the canonical 16 kHz mono stream to N subscribers.
 //! * An `agorabus` client connector that publishes the lifecycle events
 //!   and subscribes to TTS / dialog control topics, driving a mute
 //!   state machine.
@@ -16,7 +16,7 @@
 //! The actual wake-word (`microWakeWord`) and VAD (`Silero`) ONNX
 //! inference, plus the `PipeWire` capture implementation, are deferred
 //! to subsequent iterations. They plug in behind [`MicSource`] /
-//! [`PcmConsumer`] without disturbing the topology built here.
+//! [`fanout::channel`] without disturbing the topology built here.
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
@@ -24,6 +24,7 @@ pub mod config;
 pub mod daemon;
 pub mod errors;
 pub mod events;
+pub mod fanout;
 pub mod source;
 pub mod state;
 
