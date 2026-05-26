@@ -1,0 +1,19 @@
+{
+  "schema": "autobuilder.owner_map.v1",
+  "default_owner": "autobuilder",
+  "routes": [
+    { "glob": "src/**", "owner": "edit-agent" },
+    { "glob": "tests/acceptance_*.rs", "owner": "edit-agent (body only; //! header metadata is read-only — re-scaffold via intent_card_amendment_request.json to change AC metadata)" },
+    { "glob": "tests/adversarial_*.rs", "owner": "adversarial-agent (full file ownership; written AFTER edit-agent's iter to attempt falsification per prompts/adversarial-agent.md)" },
+    { "glob": "tests/proptest_invariants.rs", "owner": "scaffold (read-only)" },
+    { "glob": "tests/fuzz/**", "owner": "scaffold (read-only)" },
+    { "glob": "scripts/**", "owner": "skill (read-only template; project-local fixes for recurring template bugs are allowed and should fold back via postmortem)" },
+    { "glob": "agent/**", "owner": "orchestrator" },
+    { "glob": "Cargo.toml", "owner": "edit-agent (dependency additions only; lints/edition/MSRV are scaffold-owned)" },
+    { "glob": "Cargo.lock", "owner": "edit-agent (deps-only iterations)" },
+    { "glob": "clippy.toml", "owner": "scaffold (read-only)" },
+    { "glob": "deny.toml", "owner": "scaffold (read-only)" },
+    { "glob": "rust-toolchain.toml", "owner": "scaffold (read-only)" },
+    { "glob": ".github/**", "owner": "scaffold (read-only)" }
+  ]
+}

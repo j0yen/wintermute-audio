@@ -1,0 +1,21 @@
+{
+  "schema": "autobuilder.test_map.v1",
+  "routes": [
+    {
+      "glob": "src/**",
+      "required_proof": [
+        "cargo test --workspace",
+        "tests/acceptance_*.rs",
+        "tests/proptest_invariants.rs"
+      ]
+    },
+    {
+      "glob": "Cargo.toml",
+      "required_proof": ["cargo check --workspace", "cargo deny check"]
+    },
+    {
+      "glob": "Cargo.lock",
+      "required_proof": ["cargo deny check"]
+    }
+  ]
+}

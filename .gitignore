@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+Cargo.lock.bk
+.DS_Store
+# subagent isolation worktrees (Claude Code Agent --isolation=worktree
+# creates these inside the slice; never part of the slice artifact)
+.claude/worktrees/

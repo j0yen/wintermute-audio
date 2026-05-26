@@ -1,0 +1,161 @@
+{
+  "schema": "autobuilder.intent_card.v1",
+  "intent_slug": "wintermute-audio",
+  "prd_source": "/home/jsy/wintermute/autobuilder/PRD-wintermute-audio.md",
+  "root_motivation": "Always-on voice for a non-literate user requires a clean, single canonical microphone pipeline: PipeWire `module-echo-cancel` removes the laptop's own TTS so wake words don't retrigger; NoiseTorch-ng suppresses keyboard/fan/room noise; microWakeWord ONNX provides low-CPU, low-false-accept wake detection (the same engine HA Voice Preview Edition shipped in 2026); Silero VAD locates utterance boundaries; one daemon (`wm-audio`) fans the 16 kHz mono PCM out over a Unix socket to many consumers (STT first, more later) and publishes start/chunk/end/wake events on agorabus. Plan-agent collapsed two PRDs (audio-pipeline + wake) into this one because wake and VAD are thin consumers of the same mic stream — no extra process boundary justifies itself.",
+  "user_persona": "Two programmatic consumers. Primary: `wm-stt` subscribes to `$XDG_RUNTIME_DIR/wintermute/mic.sock` for PCM and to agorabus topics (`wm.audio.wake | speech.start | speech.chunk | speech.end | mute | unmute`). Secondary: `wm-tts` and `wm-dialog` drive mute/unmute via `wm.tts.start|end` and `wm.dialog.mute_request|unmute_request`. The non-literate end-user never invokes wm-audio directly — she experiences only its consequences.",
+  "unfakeable_metric": {
+    "name": "acceptance_tests_passing",
+    "lower_is_better": false,
+    "harness_command": "cargo test --release --quiet -- --format=terse 2>&1 | awk '/test result:/ {gsub(\";\",\"\",$4); print $4}' | tail -1",
+    "target": 4
+  },
+  "acceptance_criteria": [
+    {
+      "id": "AC1",
+      "level": "MUST",
+      "description": "With `wm-tts` actively playing a 5-second sentence over speakers (not headphones), the wake word does NOT fire even once across 30 repetitions. (AEC working end-to-end.)",
+      "test": "tests/acceptance_ac1.rs::aec_blocks_self_wake_30_repetitions — #[ignore]'d (requires real speakers + mic + wm-tts + AEC3-built PipeWire). Documented manual procedure: drive 30 TTS plays, assert zero `wm.audio.wake` events on the bus during playback windows. Unit-level path verifies the wake-mute gate (subscribes wm.tts.start, sets internal `wake_muted=true`, drops wake events through the gate)."
+    },
+    {
+      "id": "AC2",
+      "level": "MUST",
+      "description": "Typing on the laptop keyboard while the mic is open reduces input level by >=10 dB compared to AEC-only mode (NoiseTorch verified).",
+      "test": "tests/acceptance_ac2.rs::noisetorch_reduces_keyboard_noise_10db — #[ignore]'d (requires NoiseTorch-ng installed and a real keyboard). Documented manual procedure: measure RMS dBFS over 5 s of typing with NS off vs on, assert delta >= 10 dB. Unit-level path verifies the source-selection logic (prefer NoiseTorch virtual source if present, fall back to `wm-mic-cancelled`)."
+    },
+    {
+      "id": "AC3",
+      "level": "MUST",
+      "description": "Wake -> `wm.audio.wake` event published latency: <200 ms.",
+      "test": "tests/acceptance_ac3.rs::wake_event_publish_under_200ms — feeds a recorded WAV containing the wake word into the in-process pipeline against a fake microWakeWord scorer that fires at the known timestamp; asserts elapsed_ms from sample-hit to agorabus publish call <= 200. Real-mic version #[ignore]'d."
+    },
+    {
+      "id": "AC4",
+      "level": "MUST",
+      "description": "End-of-speech -> `wm.audio.speech.end` event latency: <500 ms (after 500 ms of confirmed silence).",
+      "test": "tests/acceptance_ac4.rs::speech_end_under_500ms — drives a fake VAD score stream that flips speech->silence at t0; asserts `wm.audio.speech.end` published at t0 + 500 +/- 50 ms. Real-mic version #[ignore]'d."
+    },
+    {
+      "id": "AC5",
+      "level": "SHOULD",
+      "description": "False-accept rate on a 60-minute recording of ambient living-room speech (TV at conversational volume): <0.5/hr.",
+      "test": "tests/acceptance_ac5.rs::false_accept_rate_under_half_per_hour — #[ignore]'d (long-running, requires curated 60-min WAV fixture). Documented manual procedure: replay fixture into the in-process scorer at real-time speed, assert wake-detection count over 60 minutes < 1. Unit-level path verifies the threshold-and-debounce logic against synthesized scores."
+    },
+    {
+      "id": "AC6",
+      "level": "SHOULD",
+      "description": "Wake-word hot-swap via `wm.audio.reload` completes in <2 s without dropping mic capture.",
+      "test": "tests/acceptance_ac6.rs::reload_swaps_wake_word_under_2s — fake model loader; publishes `wm.audio.reload` with WM_WAKE_WORD changed; asserts new scorer active within 2 s wall-clock AND mic capture frame counter increments monotonically across the swap (no drop). Real-ONNX swap #[ignore]'d."
+    },
+    {
+      "id": "AC7",
+      "level": "SHOULD",
+      "description": "Two simultaneous mic.sock subscribers can consume the PCM stream for 60 minutes without dropouts (verified by checksum on captured PCM at each consumer).",
+      "test": "tests/acceptance_ac7.rs::dual_subscriber_60min_no_dropouts — #[ignore]'d (long-running, requires running daemon + two UDS clients). Documented manual procedure: two `socat UNIX-CONNECT:.../mic.sock - > pcmN.raw` clients for 60 min, assert sha256(pcm1)==sha256(pcm2) AND total frame count matches expected rate*duration. Unit-level path exercises the fanout queue (push N frames, two consumer-task receivers, assert both see all N in order)."
+    },
+    {
+      "id": "AC8",
+      "level": "SHOULD",
+      "description": "Daemon recovers from PipeWire restart (`systemctl --user restart pipewire`) without manual intervention within 5 s.",
+      "test": "tests/acceptance_ac8.rs::pipewire_restart_recovery_under_5s — #[ignore]'d (requires real systemd + pipewire). Documented manual procedure: start wm-audio, restart pipewire, assert mic capture resumes within 5 s by checking frame counter via wm-audio's status socket. Unit-level path verifies the reconnect state machine (mock pipewire client returns Disconnected, daemon retries with backoff, success within 5 retries)."
+    }
+  ],
+  "scope": [
+    "Rust binary `wm-audio`: long-lived daemon that opens the configured PipeWire input node (env `WM_MIC_NODE`, fed through `module-echo-cancel` + optional NoiseTorch virtual source), resamples to 16 kHz mono PCM, and shares the stream via a lock-free ring buffer.",
+    "Three async tasks consuming the ring buffer: (a) UDS fanout at `$XDG_RUNTIME_DIR/wintermute/mic.sock` to N subscribers; (b) wake detection running microWakeWord ONNX every 80 ms on a 1280-sample window; (c) VAD running Silero VAD ONNX every 32 ms with rising-edge speech.start and 500 ms-confirmed silence speech.end.",
+    "agorabus publishes: `wm.audio.wake | speech.start | speech.chunk | speech.end | mute | unmute` with the payloads documented in PRD §2.3.",
+    "agorabus subscribes: `wm.tts.start | wm.tts.end` (gate wake detection during self-speech to mop up any AEC tail) and `wm.dialog.mute_request | wm.dialog.unmute_request` (full mic mute).",
+    "Startup-time AEC3 probe: parse `pw-cli`/module-load output, detect aec3 availability, fall back to classic webrtc-aec, log a single clear warning.",
+    "Hot-swap of wake word via `wm.audio.reload`: re-read `WM_WAKE_WORD` env, load new ONNX model, atomically swap the scorer without dropping mic capture.",
+    "Reads configuration from `/etc/wintermute/conf.d/00-bootstrap.env` (`WM_MIC_NODE`, `WM_WAKE_WORD`, optional `WM_WAKE_THRESHOLD` default 0.6)."
+  ],
+  "non_goals": [
+    "Installing the PipeWire drop-in (`~/.config/pipewire/pipewire.conf.d/99-wintermute.conf`) or the `wm-noise on|off` helper — those are the hook portion of this PRD, installed by wintermute-platform's hook phase, not the Rust crate.",
+    "Packaging the microWakeWord / Silero VAD / whisper.cpp ONNX models — separate `wm-models` AUR-style package per PRD §2.5; wm-audio loads them from `/usr/share/wintermute/models/`.",
+    "Speaker diarization / voice profile gating (Fleet 3).",
+    "Custom-trained wake words (Fleet 3 if microWakeWord training improves).",
+    "Bluetooth audio routing and multi-mic beamforming (Fleet 2/3).",
+    "`wm-audio dump` subcommand for the rolling 10 s PCM buffer (PRD §7 says cheap to add in iter-2; defer).",
+    "Defining systemd unit files (`wm-audio.service`) — installed via wintermute-platform's hook portion."
+  ],
+  "hard_constraints": {
+    "rust_edition": "2024",
+    "target_kind": "cli",
+    "deny_unsafe": true,
+    "max_deps": 25,
+    "msrv": "1.85",
+    "additional": {
+      "bin_name": "wm-audio",
+      "sample_rate_hz": 16000,
+      "channels": 1,
+      "wake_window_samples": 1280,
+      "wake_inference_period_ms": 80,
+      "vad_inference_period_ms": 32,
+      "speech_end_confirm_ms": 500,
+      "wake_threshold_default": 0.6,
+      "default_wake_word": "hey_jarvis",
+      "mic_socket_path": "$XDG_RUNTIME_DIR/wintermute/mic.sock",
+      "config_path": "/etc/wintermute/conf.d/00-bootstrap.env",
+      "models_dir": "/usr/share/wintermute/models/",
+      "wake_event_latency_target_ms": 200,
+      "speech_end_event_latency_target_ms": 500,
+      "reload_target_seconds": 2,
+      "pipewire_recovery_target_seconds": 5,
+      "install_path": "~/.local/bin/ (per CLAUDE_SELF.md convention; same as wintermute-platform and wintermute-tts)"
+    }
+  },
+  "five_whys_trace": [
+    {
+      "why": 1,
+      "q": "Why does wintermute need a dedicated `wm-audio` daemon rather than letting each consumer (wm-stt, future diarization) open the mic directly?",
+      "a": "Because PipeWire's `module-echo-cancel` only attaches cleanly to ONE capture chain at a time, and AEC is non-negotiable for always-on voice (TTS retriggering wake is the failure mode the whole fleet falls apart on). One canonical AEC'd + NS'd capture stream owned by `wm-audio`, fanned out to N consumers over UDS, also avoids N redundant ONNX wake/VAD inferences and lets the daemon gate wake-detection on `wm.tts.start`/`end` events centrally."
+    },
+    {
+      "why": 2,
+      "q": "Why microWakeWord over openWakeWord, Porcupine, or Snowboy?",
+      "a": "Home Assistant's Voice Preview Edition shipped microWakeWord (not openWakeWord) in 2026 precisely because the false-accept profile is better for always-on use and CPU draw is much lower. openWakeWord's custom-wake-word training pipeline has known synthetic-TTS-vs-real-voice mismatch issues, and the primary user can't retrain. Porcupine is closed-source / commercial. Snowboy is unmaintained. microWakeWord ships pretrained `hey_jarvis | okay_nabu | hey_mycroft` — pick one, let the user learn it."
+    },
+    {
+      "why": 3,
+      "q": "Why Silero VAD specifically, and why a separate VAD at all (microWakeWord could in theory mark utterance boundaries)?",
+      "a": "Silero VAD is the 2026 standard for turn-end detection: ONNX, ~1 MB, well-understood with documented hangover/confirmation tuning. microWakeWord fires once per utterance start at most; it cannot tell you when the user has finished speaking. End-of-speech matters for STT (you have to know when to flush the buffer and run inference) and for dialog turn-taking. The two models address different questions and the cost of both is small."
+    },
+    {
+      "why": 4,
+      "q": "Why UDS fanout at `mic.sock` rather than having `wm-stt` (and future consumers) subscribe to PCM frames via agorabus?",
+      "a": "agorabus is for events (small JSON payloads, sub-Hz to ~Hz publish rates). 16 kHz mono PCM at 32 ms hops is ~500 frames/s of binary data — wrong shape for a JSON bus and would dominate its throughput. A Unix-domain socket is the right primitive for the bulk-data channel; agorabus carries the metadata (wake/start/chunk-marker/end) that points at the PCM byte ranges."
+    },
+    {
+      "why": 5,
+      "q": "Why detect AEC3 vs classic webrtc-aec at startup rather than just requiring AEC3 in the install docs?",
+      "a": "Arch's `pipewire` package historically builds with `aec3=true` but the flag isn't guaranteed across rebuilds or Arch derivatives. A hard requirement would brick the daemon on otherwise-functional systems; a probe-and-warn keeps `wm-audio` running with classic webrtc-aec (worse but workable) and surfaces the diagnostic without requiring the operator to read pipewire build logs. Repo README documents the rebuild path for users who want AEC3."
+    }
+  ],
+  "ambiguities_resolved": [
+    {
+      "question": "PRD §7 open question: should NoiseTorch-ng be hard-required, or fall back to webrtc-ns (lower quality, no extra dep)?",
+      "resolution": "Hard-required as documented system dep, BUT the daemon does not link or spawn it. `wm-audio` prefers the NoiseTorch virtual-source node if present at startup; falls back to `wm-mic-cancelled` (AEC-only, no NS) with a clear log line if not. PRD's leaning (hard-required) is honored in docs/install; the runtime is resilient because that's the cheaper bet."
+    },
+    {
+      "question": "PRD §7 open question: is there value in a `wm-audio dump` subcommand that records the last 10 s of PCM for debugging false wakes?",
+      "resolution": "Deferred to iter-2. iter-1 scaffolds the single long-running daemon path only. PRD says 'probably yes; cheap to add in iter-2' and that's exactly when we'll add it — once the core pipeline is proven."
+    },
+    {
+      "question": "PRD §2.1 AEC3 build-flag fallback — should it be a runtime probe or a build-time feature flag?",
+      "resolution": "Runtime probe at startup. The daemon parses module-load output (the `pw-cli load-module` response or `pw-dump` after configuring), sets an internal `aec_mode = Aec3 | ClassicWebrtc` flag, logs a single warning if it falls back, and continues. A build-time flag would require shipping two binaries for one laptop, which is wasteful."
+    },
+    {
+      "question": "PRD §2.4 defaults: what wake word ships as the out-of-box default?",
+      "resolution": "`hey_jarvis` — the most-tested microWakeWord pretrained model in 2026 HA Voice Preview Edition deployments, and the most acoustically distinct of the three (`okay_nabu` and `hey_mycroft` have closer phoneme overlap with common English words). The bootstrap form (PRD-wintermute-bootstrap AC2) lets the caregiver pick any of the three; this default applies only when WM_WAKE_WORD is unset."
+    },
+    {
+      "question": "PRD §2.3 `mic.sock` path — where exactly under `$XDG_RUNTIME_DIR`?",
+      "resolution": "`$XDG_RUNTIME_DIR/wintermute/mic.sock`. Matches the convention wintermute-platform established for `$XDG_RUNTIME_DIR/wintermute/init.sock`. The daemon creates the `wintermute` subdirectory at startup if absent (0700 perms, owned by the running user)."
+    },
+    {
+      "question": "PRD §2.3 'spawn three async tasks' — tokio, smol, or hand-rolled?",
+      "resolution": "tokio (per PRD §3 dependency table). iter-1 scaffolds the layout but does NOT yet pin `tokio` in Cargo.toml; the real dependency lands in iter-2 alongside `ort`, `pipewire-rs`, `ringbuf`. iter-1's job is structure + an empty `cargo check --release`-green scaffold."
+    }
+  ],
+  "created_at": "2026-05-25T03:26:16Z"
+}

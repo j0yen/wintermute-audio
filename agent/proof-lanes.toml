@@ -1,0 +1,57 @@
+# proof-lanes.toml — change-class → required-lane routing.
+# READ-ONLY after scaffold. The edit-agent must NOT modify this.
+#
+# Lifted shape from jankurai/agent/proof-lanes.toml. Each lane has a set of
+# globs that route to it. A Stage-3 advance requires every changed path to
+# resolve to ≥1 lane AND that lane's required_command must be green.
+
+[[lane]]
+id = "rust-source"
+description = "Behavior changes in src/"
+globs = ["src/**/*.rs"]
+required_commands = [
+  "cargo check --workspace",
+  "cargo clippy --workspace -- -D warnings",
+  "cargo test --workspace",
+]
+
+[[lane]]
+id = "rust-tests"
+description = "Test-only changes (only allowed via intent-card amendment)"
+globs = ["tests/**/*.rs"]
+required_commands = [
+  "cargo test --workspace",
+]
+
+[[lane]]
+id = "deps"
+description = "Cargo.toml / Cargo.lock changes"
+globs = ["Cargo.toml", "Cargo.lock"]
+required_commands = [
+  "cargo check --workspace",
+  "cargo deny check",
+]
+
+[[lane]]
+id = "ci"
+description = "GitHub Actions workflow changes"
+globs = [".github/workflows/**"]
+required_commands = [
+  "scripts/audit.sh",
+]
+
+[[lane]]
+id = "harness-readonly"
+description = "Harness files; should never change after scaffold"
+globs = [
+  "scripts/run-metrics.sh",
+  "scripts/audit.sh",
+  "scripts/risk-gate.sh",
+  "clippy.toml",
+  "deny.toml",
+  "rust-toolchain.toml",
+]
+required_commands = [
+  "exit 1",
+]
+note = "Any change to a harness-readonly path fails the gate. Use an intent-card amendment to legitimately modify."

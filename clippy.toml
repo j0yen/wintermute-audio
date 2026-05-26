@@ -1,0 +1,12 @@
+# Clippy configuration for autobuilder-generated projects.
+# Lints themselves are declared in Cargo.toml [lints.clippy] (strict by default).
+
+avoid-breaking-exported-api = false
+msrv = "1.85"
+
+# Tighten thresholds where the default is overly permissive for generated code.
+cognitive-complexity-threshold = 20
+type-complexity-threshold = 200
+too-many-arguments-threshold = 5
+too-many-lines-threshold = 80
+trivial-copy-size-limit = 16
