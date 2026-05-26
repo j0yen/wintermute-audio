@@ -27,6 +27,7 @@ pub mod events;
 pub mod fanout;
 pub mod source;
 pub mod state;
+pub mod wake;
 
 pub use config::Config;
 pub use daemon::{Daemon, run};
@@ -37,3 +38,7 @@ pub use events::{
 };
 pub use source::{MicSource, NullSource, PcmFrame, SourceMeta};
 pub use state::{MuteReason, MuteState, Shutdown};
+pub use wake::{
+    NullWakeDetector, WAKE_STRIDE_SAMPLES, WAKE_WINDOW_SAMPLES, WakeDetector, WakeOutcome,
+    WakeWindow,
+};

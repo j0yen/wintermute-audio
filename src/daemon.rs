@@ -3,14 +3,16 @@
 
 use crate::config::Config;
 use crate::errors::AudioError;
-use crate::events::{ControlEvent, Timestamp};
+use crate::events::{AudioEvent, ControlEvent, Timestamp, WakeDetected};
 use crate::fanout;
 use crate::source::{MicSource, PcmFrame};
 use crate::state::{MuteReason, MuteState, Shutdown};
+use crate::wake::{NullWakeDetector, WakeDetector, WakeOutcome, WakeWindow};
 
 use agorabus::Client;
 use ringbuf::HeapRb;
-use ringbuf::traits::{Observer as _, Producer as _, Split as _};
+use ringbuf::traits::{Consumer as _, Observer as _, Producer as _, Split as _};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -29,18 +31,34 @@ pub struct Daemon<S: MicSource> {
     source: S,
     mute: MuteState,
     shutdown: Shutdown,
+    wake_detector: Arc<dyn WakeDetector>,
 }
 
 impl<S: MicSource> Daemon<S> {
     /// Construct a daemon with the given config + capture source.
+    ///
+    /// Defaults to a [`NullWakeDetector`] labelled from
+    /// [`Config::wake_word`]. Swap in a real backend via
+    /// [`Daemon::with_wake_detector`].
     #[must_use]
     pub fn new(config: Config, source: S) -> Self {
+        let label = config.wake_word.as_label().to_owned();
         Self {
             config,
             source,
             mute: MuteState::new(),
             shutdown: Shutdown::new(),
+            wake_detector: Arc::new(NullWakeDetector::new(label)),
         }
+    }
+
+    /// Swap in a wake-word backend. Returns `self` for the builder
+    /// pattern. The backend MUST be `Send + Sync` (enforced by the
+    /// trait's supertraits).
+    #[must_use]
+    pub fn with_wake_detector<W: WakeDetector + 'static>(mut self, detector: W) -> Self {
+        self.wake_detector = Arc::new(detector);
+        self
     }
 
     /// Shared mute handle (for tests / inspection).
@@ -68,6 +86,7 @@ impl<S: MicSource> Daemon<S> {
             source,
             mute,
             shutdown,
+            wake_detector,
         } = self;
 
         info!(
@@ -156,9 +175,12 @@ impl<S: MicSource> Daemon<S> {
         });
 
         // 6. Main loop: drain capture frames, push into the ring,
-        //    publish bus events on transitions. Real wake/VAD
-        //    inference plugs in here in iter-3+.
+        //    publish bus events on transitions. Wake inference plugs
+        //    in via the [`WakeDetector`] trait; the iter-7 default
+        //    backend is [`NullWakeDetector`].
         let mut total_samples: u64 = 0;
+        let mut wake_window = WakeWindow::with_defaults();
+        let mut wake_was_active = mute.should_run_wake();
         loop {
             if shutdown.is_triggered() {
                 info!("shutdown requested, draining");
@@ -198,12 +220,49 @@ impl<S: MicSource> Daemon<S> {
             // when nothing is listening — ignore.
             let _ = bcast_tx.send(frame);
 
-            // Drain the ring so it doesn't fill until wake/VAD (iter-4+)
-            // attach as the real consumer. Lives separately from the
-            // broadcast fanout above.
+            // Drain the in-process ring into the wake window. On a
+            // TTS-mute edge, flush the buffer so the next inference
+            // does not run on stale audio from before un-mute.
             let avail = consumer.occupied_len();
             if avail > 0 {
-                let _ = drain_ring(&mut consumer, avail);
+                let wake_active = mute.should_run_wake();
+                if wake_active && !wake_was_active {
+                    wake_window.clear();
+                }
+                wake_was_active = wake_active;
+
+                let mut scratch = vec![0_i16; avail];
+                let popped = consumer.pop_slice(&mut scratch);
+                scratch.truncate(popped);
+                if wake_active {
+                    wake_window.push(&scratch);
+                }
+            }
+
+            // Run inference on every complete window that accumulated.
+            while let Some(window) = wake_window.next_window() {
+                if !mute.should_run_wake() {
+                    continue;
+                }
+                let WakeOutcome::Detected { confidence } = wake_detector.process(&window) else {
+                    continue;
+                };
+                if confidence < config.wake_threshold {
+                    continue;
+                }
+                let ev = AudioEvent::Wake(WakeDetected {
+                    wake_word: wake_detector.label().to_owned(),
+                    confidence,
+                    ts: Timestamp::now(),
+                });
+                match ev.payload() {
+                    Ok(payload) => {
+                        if let Err(e) = pub_client.publish(ev.topic(), payload).await {
+                            warn!(error = %e, "publish wake failed");
+                        }
+                    }
+                    Err(e) => warn!(error = %e, "serialize wake payload failed"),
+                }
             }
         }
 
@@ -302,20 +361,11 @@ async fn install_signal_handlers(shutdown: Shutdown) {
     shutdown.trigger();
 }
 
-/// Consume up to `n` samples from the ring into a discard buffer.
-/// Returns the number actually drained.
-fn drain_ring<C: ringbuf::traits::Consumer<Item = i16>>(
-    consumer: &mut C,
-    n: usize,
-) -> usize {
-    let mut sink = vec![0_i16; n];
-    consumer.pop_slice(&mut sink)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::source::NullSource;
+    use crate::wake::WAKE_WINDOW_SAMPLES;
 
     fn test_config() -> Config {
         Config {
@@ -339,5 +389,42 @@ mod tests {
         assert!(!s.is_triggered());
         s.trigger();
         assert!(s.is_triggered());
+    }
+
+    /// Stub detector that records every window it sees, used to assert
+    /// the daemon hands inference windows to the trait.
+    #[derive(Clone, Default)]
+    struct RecordingDetector {
+        seen: std::sync::Arc<std::sync::Mutex<usize>>,
+    }
+
+    impl WakeDetector for RecordingDetector {
+        fn label(&self) -> &str {
+            "stub"
+        }
+
+        fn process(&self, _window: &[i16]) -> WakeOutcome {
+            if let Ok(mut guard) = self.seen.lock() {
+                *guard = guard.saturating_add(1);
+            }
+            WakeOutcome::NotDetected
+        }
+    }
+
+    #[tokio::test]
+    async fn with_wake_detector_swaps_backend() {
+        // Constructor-level check: builder accepts and stores a real
+        // detector implementation. Running the loop requires a live
+        // agorabus daemon, which the test harness does not have —
+        // we only validate the wiring shape here.
+        let stub = RecordingDetector::default();
+        let d = Daemon::new(test_config(), NullSource::default())
+            .with_wake_detector(stub.clone());
+        // Use the stored detector to demonstrate the trait object is
+        // callable through the daemon's clone of the Arc.
+        d.wake_detector.process(&[0_i16; WAKE_WINDOW_SAMPLES]);
+        d.wake_detector.process(&[0_i16; WAKE_WINDOW_SAMPLES]);
+        let seen = stub.seen.lock().map(|g| *g).unwrap_or(0);
+        assert_eq!(seen, 2, "trait dispatch should reach the swapped backend");
     }
 }
