@@ -1,0 +1,56 @@
+#!/bin/sh
+# wm-noise — toggle the NoiseTorch-ng virtual source.
+#
+# Usage:
+#   wm-noise on   # load NoiseTorch on the default input (or $WM_NOISE_SOURCE)
+#   wm-noise off  # unload all NoiseTorch instances
+#   wm-noise status
+#
+# wm-audio consumes the NoiseTorch virtual source if loaded; otherwise
+# it falls back to PipeWire's AEC-cancelled `wm-mic-cancelled` source.
+# Either is acceptable; NoiseTorch is preferred for typing / fan
+# rejection.
+#
+# Required by PRD-wintermute-audio §2.2.
+
+set -eu
+
+err() { printf '%s\n' "wm-noise: $*" >&2; }
+
+if ! command -v noisetorch >/dev/null 2>&1; then
+  err "noisetorch not installed; install AUR 'noisetorch-ng-bin'"
+  exit 127
+fi
+
+cmd=${1:-status}
+
+case $cmd in
+  on)
+    if [ -n "${WM_NOISE_SOURCE:-}" ]; then
+      exec noisetorch -i "$WM_NOISE_SOURCE"
+    fi
+    # No explicit source: let noisetorch pick the default input.
+    exec noisetorch -i
+    ;;
+  off)
+    exec noisetorch -u
+    ;;
+  status)
+    # noisetorch has no `--status`; probe for a loaded virtual source
+    # via pactl. Exit 0 = active, 1 = inactive, 2 = couldn't probe.
+    if ! command -v pactl >/dev/null 2>&1; then
+      err "pactl not available; cannot probe NoiseTorch state"
+      exit 2
+    fi
+    if pactl list sources short 2>/dev/null | grep -qi 'noisetorch'; then
+      printf 'on\n'
+      exit 0
+    fi
+    printf 'off\n'
+    exit 1
+    ;;
+  *)
+    err "usage: wm-noise on|off|status"
+    exit 2
+    ;;
+esac
