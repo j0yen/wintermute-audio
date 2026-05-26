@@ -27,6 +27,7 @@ pub mod events;
 pub mod fanout;
 pub mod source;
 pub mod state;
+pub mod vad;
 pub mod wake;
 
 pub use config::Config;
@@ -38,6 +39,10 @@ pub use events::{
 };
 pub use source::{MicSource, NullSource, PcmFrame, SourceMeta};
 pub use state::{MuteReason, MuteState, Shutdown};
+pub use vad::{
+    NullVadDetector, SPEECH_END_HANGOVER_MS, SpeechEdge, VAD_FRAME_MS, VAD_STRIDE_SAMPLES,
+    VAD_WINDOW_SAMPLES, VadDetector, VadEdgeTracker, VadOutcome, VadWindow,
+};
 pub use wake::{
     NullWakeDetector, WAKE_STRIDE_SAMPLES, WAKE_WINDOW_SAMPLES, WakeDetector, WakeOutcome,
     WakeWindow,
