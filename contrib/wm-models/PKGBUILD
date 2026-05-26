@@ -1,0 +1,61 @@
+# Maintainer: Joe Yen <jyen.tech@gmail.com>
+#
+# wm-models — pretrained ONNX bundles for wintermute-audio + wintermute-stt.
+# Ships:
+#   - microWakeWord ONNX for the three pretrained wake words
+#     (hey_jarvis, okay_nabu, hey_mycroft) sourced from the upstream
+#     micro_wake_word_models repo (HA's pre-trained collection).
+#   - Silero VAD ONNX for turn-end detection.
+#   - whisper.cpp ggml-base.en model for wm-stt.
+#
+# All assets install to /usr/share/wintermute/models/ as documented in
+# PRD-wintermute-audio §2.5.
+#
+# Hash pinning: sha256sums use 'SKIP' placeholders in this scaffold so
+# the PKGBUILD parses on any machine. Run `update-hashes.sh` once on a
+# host with network access to materialize real hashes via updpkgsums
+# (provided by the `pacman-contrib` package) before publishing to AUR.
+
+pkgname=wm-models
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Pretrained ONNX models for wintermute (microWakeWord + Silero VAD + whisper.cpp)"
+arch=('any')
+url="https://github.com/j0yen/wintermute-audio"
+license=('MIT' 'Apache-2.0')
+depends=()
+makedepends=()
+
+# microWakeWord pretrained models. Upstream uses TFLite as canonical
+# format and ships matching ONNX in the same release tree. Pinned tag is
+# tracked by the parent crate's WM_WAKE_MODEL_REV env var.
+_mwwm_rev="v2.0"
+_silero_rev="v5.1.2"
+_whisper_rev="v1.7.5"
+
+source=(
+  "hey_jarvis.onnx::https://github.com/esphome/micro-wake-word-models/raw/${_mwwm_rev}/models/v2/hey_jarvis.onnx"
+  "okay_nabu.onnx::https://github.com/esphome/micro-wake-word-models/raw/${_mwwm_rev}/models/v2/okay_nabu.onnx"
+  "hey_mycroft.onnx::https://github.com/esphome/micro-wake-word-models/raw/${_mwwm_rev}/models/v2/hey_mycroft.onnx"
+  "silero_vad.onnx::https://github.com/snakers4/silero-vad/raw/${_silero_rev}/src/silero_vad/data/silero_vad.onnx"
+  "ggml-base.en.bin::https://huggingface.co/ggerganov/whisper.cpp/resolve/${_whisper_rev}/ggml-base.en.bin"
+)
+
+# Materialize with `updpkgsums` (pacman-contrib). SKIP placeholders keep
+# the file parseable on every host but should NOT be shipped to AUR.
+sha256sums=(
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+)
+
+package() {
+  install -dm755 "${pkgdir}/usr/share/wintermute/models"
+  install -m644 "${srcdir}/hey_jarvis.onnx"   "${pkgdir}/usr/share/wintermute/models/hey_jarvis.onnx"
+  install -m644 "${srcdir}/okay_nabu.onnx"    "${pkgdir}/usr/share/wintermute/models/okay_nabu.onnx"
+  install -m644 "${srcdir}/hey_mycroft.onnx"  "${pkgdir}/usr/share/wintermute/models/hey_mycroft.onnx"
+  install -m644 "${srcdir}/silero_vad.onnx"   "${pkgdir}/usr/share/wintermute/models/silero_vad.onnx"
+  install -m644 "${srcdir}/ggml-base.en.bin"  "${pkgdir}/usr/share/wintermute/models/ggml-base.en.bin"
+}

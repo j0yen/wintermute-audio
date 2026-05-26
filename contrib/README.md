@@ -15,6 +15,7 @@ configs themselves are MIT/Apache-2.0 to match the parent repo.
 |---|---|---|
 | `pipewire/99-wintermute.conf` | echo-cancel drop-in (PRD §2.1) | `~/.config/pipewire/pipewire.conf.d/` |
 | `bin/wm-noise` | NoiseTorch-ng `on / off / status` helper (PRD §2.2) | `~/.local/bin/` |
+| `wm-models/PKGBUILD` | pretrained ONNX bundle (PRD §2.5) | `/usr/share/wintermute/models/` |
 
 ## Install
 
@@ -47,10 +48,15 @@ pw-cli list-modules | grep -i echo
 journalctl --user -u wm-audio -b | grep -i aec3
 ```
 
-## Deferred
+## wm-models
 
-- `wm-models` PKGBUILD — bundles microWakeWord ONNX, Silero VAD,
-  and the default whisper.cpp model into `/usr/share/wintermute/models/`.
-  Lands once upstream model URLs and hashes are pinned. Until then,
-  point `WM_WAKE_MODEL` / `WM_VAD_MODEL` env vars at locally downloaded
-  ONNX files.
+```sh
+cd contrib/wm-models
+./update-hashes.sh         # one-time: replace SKIP placeholders
+makepkg -si --noconfirm
+```
+
+See `wm-models/README.md` for the source URL list and licensing.
+The shipped PKGBUILD uses `SKIP` sha256sums so it parses anywhere;
+`update-hashes.sh` calls `updpkgsums` (from `pacman-contrib`) to
+materialize real hashes before publishing.
