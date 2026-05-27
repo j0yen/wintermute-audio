@@ -3,13 +3,17 @@
 
 use crate::config::Config;
 use crate::errors::AudioError;
-use crate::events::{AudioEvent, ControlEvent, Timestamp, WakeDetected};
+use crate::events::{
+    AudioEvent, ControlEvent, SpeechChunk, SpeechEnd, SpeechStart, Timestamp, WakeDetected,
+};
 use crate::fanout;
 use crate::source::{MicSource, PcmFrame};
 use crate::state::{MuteReason, MuteState, Shutdown};
+use crate::vad::{NullVadDetector, SpeechEdge, VadDetector, VadEdgeTracker, VadWindow};
 use crate::wake::{NullWakeDetector, WakeDetector, WakeOutcome, WakeWindow};
 
 use agorabus::Client;
+use base64::Engine as _;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer as _, Observer as _, Producer as _, Split as _};
 use std::sync::Arc;
@@ -32,6 +36,7 @@ pub struct Daemon<S: MicSource> {
     mute: MuteState,
     shutdown: Shutdown,
     wake_detector: Arc<dyn WakeDetector>,
+    vad_detector: Arc<dyn VadDetector>,
 }
 
 impl<S: MicSource> Daemon<S> {
@@ -49,6 +54,7 @@ impl<S: MicSource> Daemon<S> {
             mute: MuteState::new(),
             shutdown: Shutdown::new(),
             wake_detector: Arc::new(NullWakeDetector::new(label)),
+            vad_detector: Arc::new(NullVadDetector::new("null")),
         }
     }
 
@@ -58,6 +64,15 @@ impl<S: MicSource> Daemon<S> {
     #[must_use]
     pub fn with_wake_detector<W: WakeDetector + 'static>(mut self, detector: W) -> Self {
         self.wake_detector = Arc::new(detector);
+        self
+    }
+
+    /// Swap in a VAD backend. Returns `self` for the builder pattern.
+    /// The backend MUST be `Send + Sync` (enforced by the trait's
+    /// supertraits).
+    #[must_use]
+    pub fn with_vad_detector<V: VadDetector + 'static>(mut self, detector: V) -> Self {
+        self.vad_detector = Arc::new(detector);
         self
     }
 
@@ -87,6 +102,7 @@ impl<S: MicSource> Daemon<S> {
             mute,
             shutdown,
             wake_detector,
+            vad_detector,
         } = self;
 
         info!(
@@ -181,6 +197,9 @@ impl<S: MicSource> Daemon<S> {
         let mut total_samples: u64 = 0;
         let mut wake_window = WakeWindow::with_defaults();
         let mut wake_was_active = mute.should_run_wake();
+        let mut vad_window = VadWindow::with_defaults();
+        let mut vad_tracker = VadEdgeTracker::with_defaults();
+        let mut chunk_seq: u64 = 0;
         loop {
             if shutdown.is_triggered() {
                 info!("shutdown requested, draining");
@@ -237,9 +256,13 @@ impl<S: MicSource> Daemon<S> {
                 if wake_active {
                     wake_window.push(&scratch);
                 }
+                // VAD runs continuously while frames flow. Dialog-mute
+                // drops the frame upstream, so we only get here when
+                // PCM should be observed for speech boundaries.
+                vad_window.push(&scratch);
             }
 
-            // Run inference on every complete window that accumulated.
+            // Run wake inference on every complete window that accumulated.
             while let Some(window) = wake_window.next_window() {
                 if !mute.should_run_wake() {
                     continue;
@@ -255,13 +278,45 @@ impl<S: MicSource> Daemon<S> {
                     confidence,
                     ts: Timestamp::now(),
                 });
-                match ev.payload() {
-                    Ok(payload) => {
-                        if let Err(e) = pub_client.publish(ev.topic(), payload).await {
-                            warn!(error = %e, "publish wake failed");
-                        }
+                publish_audio_event(&mut pub_client, &ev).await;
+            }
+
+            // Run VAD inference on every complete VAD window. Publishes
+            // speech.start on rising edge, speech.chunk per in-speech
+            // window, speech.end after PRD §2.3's 500 ms hangover.
+            while let Some(window) = vad_window.next_window() {
+                let outcome = vad_detector.process(&window);
+                let edge = vad_tracker.step(outcome);
+                match edge {
+                    Some(SpeechEdge::Start) => {
+                        chunk_seq = 0;
+                        let ev = AudioEvent::SpeechStart(SpeechStart {
+                            ts: Timestamp::now(),
+                        });
+                        publish_audio_event(&mut pub_client, &ev).await;
                     }
-                    Err(e) => warn!(error = %e, "serialize wake payload failed"),
+                    Some(SpeechEdge::End { duration_ms }) => {
+                        let ev = AudioEvent::SpeechEnd(SpeechEnd {
+                            duration_ms,
+                            ts: Timestamp::now(),
+                        });
+                        publish_audio_event(&mut pub_client, &ev).await;
+                    }
+                    None => {}
+                }
+                if vad_tracker.in_speech() {
+                    let mut pcm_bytes = Vec::with_capacity(window.len().saturating_mul(2));
+                    for sample in &window {
+                        pcm_bytes.extend_from_slice(&sample.to_le_bytes());
+                    }
+                    let pcm_b64 = base64::engine::general_purpose::STANDARD.encode(&pcm_bytes);
+                    let ev = AudioEvent::SpeechChunk(SpeechChunk {
+                        seq: chunk_seq,
+                        pcm_b64,
+                        ts: Timestamp::now(),
+                    });
+                    chunk_seq = chunk_seq.saturating_add(1);
+                    publish_audio_event(&mut pub_client, &ev).await;
                 }
             }
         }
@@ -301,6 +356,17 @@ impl<S: MicSource> Daemon<S> {
 pub async fn run<S: MicSource>(source: S) -> Result<(), AudioError> {
     let config = Config::from_env()?;
     Daemon::new(config, source).run().await
+}
+
+async fn publish_audio_event(client: &mut Client, ev: &AudioEvent) {
+    match ev.payload() {
+        Ok(payload) => {
+            if let Err(e) = client.publish(ev.topic(), payload).await {
+                warn!(topic = ev.topic(), error = %e, "publish failed");
+            }
+        }
+        Err(e) => warn!(topic = ev.topic(), error = %e, "serialize payload failed"),
+    }
 }
 
 async fn run_control_loop(mut sub: Client, mute: MuteState, shutdown: Shutdown) {
@@ -426,5 +492,38 @@ mod tests {
         d.wake_detector.process(&[0_i16; WAKE_WINDOW_SAMPLES]);
         let seen = stub.seen.lock().map(|g| *g).unwrap_or(0);
         assert_eq!(seen, 2, "trait dispatch should reach the swapped backend");
+    }
+
+    /// Stub VAD that returns whatever outcome was prepared, for
+    /// trait-dispatch verification.
+    #[derive(Clone, Default)]
+    struct RecordingVad {
+        seen: std::sync::Arc<std::sync::Mutex<usize>>,
+    }
+
+    impl crate::vad::VadDetector for RecordingVad {
+        fn label(&self) -> &str {
+            "stub-vad"
+        }
+
+        fn process(&self, _window: &[i16]) -> crate::vad::VadOutcome {
+            if let Ok(mut guard) = self.seen.lock() {
+                *guard = guard.saturating_add(1);
+            }
+            crate::vad::VadOutcome::Silence
+        }
+    }
+
+    #[tokio::test]
+    async fn with_vad_detector_swaps_backend() {
+        let stub = RecordingVad::default();
+        let d = Daemon::new(test_config(), NullSource::default())
+            .with_vad_detector(stub.clone());
+        d.vad_detector
+            .process(&[0_i16; crate::vad::VAD_WINDOW_SAMPLES]);
+        d.vad_detector
+            .process(&[0_i16; crate::vad::VAD_WINDOW_SAMPLES]);
+        let seen = stub.seen.lock().map(|g| *g).unwrap_or(0);
+        assert_eq!(seen, 2, "trait dispatch should reach the swapped VAD backend");
     }
 }
