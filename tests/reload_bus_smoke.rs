@@ -172,3 +172,147 @@ fn reload_event_swaps_wake_detector_label_through_real_bus() {
             .expect("reload hot-swap lifecycle");
     });
 }
+
+/// PRD AC6: wake-word hot-swap via `wm.audio.reload` completes in <2 s.
+///
+/// Distinct from `reload_event_swaps_wake_detector_label_through_real_bus`
+/// (above), which verifies the swap *happens* with a retry-publish loop
+/// tolerant of subscribe races. This one gates a single publish on the
+/// daemon's sub-client appearing in the bus peer list, then measures the
+/// publish→slot-mutation latency and asserts it under AC6's 2 s budget.
+async fn run_reload_timing() -> Result<std::time::Duration, String> {
+    let bus_sock = tmp_path("bus", "sock");
+    let _ = std::fs::remove_file(&bus_sock);
+    let bus_cfg = DaemonConfig {
+        socket_path: bus_sock.clone(),
+        heartbeat_timeout: Duration::from_secs(60),
+        broadcast_capacity: 1024,
+    };
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+    let (bus_shutdown_tx, bus_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let bus_task = tokio::spawn(async move {
+        let _ = run_daemon(bus_cfg, Some(ready_tx), bus_shutdown_rx).await;
+    });
+    timeout(Duration::from_secs(2), ready_rx)
+        .await
+        .map_err(|_| "bus never signalled ready".to_string())?
+        .map_err(|e| format!("bus ready_tx dropped: {e}"))?;
+
+    let mut publisher = Client::connect(&bus_sock)
+        .await
+        .map_err(|e| format!("publisher connect: {e:#}"))?;
+    publisher
+        .announce(
+            "wake-reload-timing-pub",
+            std::process::id(),
+            "",
+            "test-publisher",
+        )
+        .await
+        .map_err(|e| format!("publisher announce: {e:#}"))?;
+
+    let mic_sock = tmp_path("mic", "sock");
+    let _ = std::fs::remove_file(&mic_sock);
+    let session_id = format!("wm-audio-reload-timing-{}", std::process::id());
+    let sub_session_id = format!("{session_id}-sub");
+    let config = Config {
+        mic_node: String::new(),
+        wake_word: WakeWord::HeyJarvis,
+        wake_threshold: 0.6,
+        mic_socket: mic_sock.clone(),
+        bus_socket: bus_sock.clone(),
+        session_id: session_id.clone(),
+    };
+
+    // Long enough that the source task is still draining while we measure.
+    let source = NullSource {
+        frames: 400,
+        frame_size: 320,
+    };
+    let daemon = Daemon::new(config, source);
+    let slot = daemon.wake_slot();
+    let pre = wake::read_slot(&slot).label().to_owned();
+    if pre != "hey-jarvis" {
+        return Err(format!(
+            "pre-condition: default detector label should be hey-jarvis, got {pre}"
+        ));
+    }
+
+    let daemon_task = tokio::spawn(async move { daemon.run().await });
+
+    // Gate on the daemon's sub session appearing in the bus peer list, so
+    // a single publish reaches a subscribed client. Then a small grace
+    // delay to let the subscribe() that follows announce() complete.
+    let peer_ready = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(peers) = publisher.peers().await {
+                if peers.iter().any(|p| p.session_id == sub_session_id) {
+                    return ();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+
+    let result = if peer_ready.is_err() {
+        Err(format!(
+            "daemon sub session '{sub_session_id}' never appeared on bus within 5s",
+        ))
+    } else {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let t0 = std::time::Instant::now();
+        let _ = publisher
+            .publish("wm.audio.reload", json!({ "wake_word": "okay_nabu" }))
+            .await;
+        let observed = timeout(Duration::from_secs(3), async {
+            loop {
+                let label = wake::read_slot(&slot).label().to_owned();
+                if label != pre {
+                    return label;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        match observed {
+            Ok(new_label) if new_label == "okay-nabu" => Ok(t0.elapsed()),
+            Ok(other) => Err(format!(
+                "expected swap to 'okay-nabu', got '{other}' (latency {:?})",
+                t0.elapsed()
+            )),
+            Err(_) => Err(format!(
+                "slot never swapped within 3 s of publish (started from '{pre}')",
+            )),
+        }
+    };
+
+    let _ = bus_shutdown_tx.send(());
+    let _ = bus_task.await;
+    let _ = timeout(Duration::from_secs(3), daemon_task).await;
+    let _ = std::fs::remove_file(&bus_sock);
+    let _ = std::fs::remove_file(&mic_sock);
+
+    result
+}
+
+#[test]
+fn reload_hot_swap_completes_within_two_seconds_ac6() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+    rt.block_on(async {
+        let elapsed = run_reload_timing().await.expect("reload timing lifecycle");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "AC6 violation: hot-swap took {elapsed:?}, budget is <2s",
+        );
+        // Sanity check the measurement is plausible (non-zero), not that
+        // we shipped without actually subscribing.
+        assert!(
+            elapsed >= Duration::from_micros(1),
+            "AC6 measurement implausible: {elapsed:?}",
+        );
+    });
+}
