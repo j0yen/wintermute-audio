@@ -45,5 +45,5 @@ pub use vad::{
 };
 pub use wake::{
     NullWakeDetector, WAKE_STRIDE_SAMPLES, WAKE_WINDOW_SAMPLES, WakeDetector, WakeOutcome,
-    WakeWindow,
+    WakeSlot, WakeWindow, read_slot, wake_slot, write_slot,
 };

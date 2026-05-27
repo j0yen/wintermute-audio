@@ -10,7 +10,9 @@ use crate::fanout;
 use crate::source::{MicSource, PcmFrame};
 use crate::state::{MuteReason, MuteState, Shutdown};
 use crate::vad::{NullVadDetector, SpeechEdge, VadDetector, VadEdgeTracker, VadWindow};
-use crate::wake::{NullWakeDetector, WakeDetector, WakeOutcome, WakeWindow};
+use crate::wake::{
+    self, NullWakeDetector, WakeDetector, WakeOutcome, WakeSlot, WakeWindow,
+};
 
 use agorabus::Client;
 use base64::Engine as _;
@@ -35,7 +37,7 @@ pub struct Daemon<S: MicSource> {
     source: S,
     mute: MuteState,
     shutdown: Shutdown,
-    wake_detector: Arc<dyn WakeDetector>,
+    wake_slot: WakeSlot,
     vad_detector: Arc<dyn VadDetector>,
 }
 
@@ -48,12 +50,13 @@ impl<S: MicSource> Daemon<S> {
     #[must_use]
     pub fn new(config: Config, source: S) -> Self {
         let label = config.wake_word.as_label().to_owned();
+        let default_detector: Arc<dyn WakeDetector> = Arc::new(NullWakeDetector::new(label));
         Self {
             config,
             source,
             mute: MuteState::new(),
             shutdown: Shutdown::new(),
-            wake_detector: Arc::new(NullWakeDetector::new(label)),
+            wake_slot: wake::wake_slot(default_detector),
             vad_detector: Arc::new(NullVadDetector::new("null")),
         }
     }
@@ -62,9 +65,17 @@ impl<S: MicSource> Daemon<S> {
     /// pattern. The backend MUST be `Send + Sync` (enforced by the
     /// trait's supertraits).
     #[must_use]
-    pub fn with_wake_detector<W: WakeDetector + 'static>(mut self, detector: W) -> Self {
-        self.wake_detector = Arc::new(detector);
+    pub fn with_wake_detector<W: WakeDetector + 'static>(self, detector: W) -> Self {
+        wake::write_slot(&self.wake_slot, Arc::new(detector));
         self
+    }
+
+    /// Shared handle to the active wake-word backend (PRD AC6
+    /// hot-swap target). Mutating the slot mid-run takes effect on the
+    /// next window inference.
+    #[must_use]
+    pub fn wake_slot(&self) -> WakeSlot {
+        Arc::clone(&self.wake_slot)
     }
 
     /// Swap in a VAD backend. Returns `self` for the builder pattern.
@@ -101,7 +112,7 @@ impl<S: MicSource> Daemon<S> {
             source,
             mute,
             shutdown,
-            wake_detector,
+            wake_slot,
             vad_detector,
         } = self;
 
@@ -180,8 +191,10 @@ impl<S: MicSource> Daemon<S> {
         // 4. Spawn the control-subscriber loop.
         let control_mute = mute.clone();
         let control_shutdown = shutdown.clone();
+        let control_wake_slot = Arc::clone(&wake_slot);
         let control_task = tokio::spawn(async move {
-            run_control_loop(sub_client, control_mute, control_shutdown).await;
+            run_control_loop(sub_client, control_mute, control_shutdown, control_wake_slot)
+                .await;
         });
 
         // 5. Spawn the signal handler that flips the shutdown flag.
@@ -263,18 +276,22 @@ impl<S: MicSource> Daemon<S> {
             }
 
             // Run wake inference on every complete window that accumulated.
+            // Re-read the slot each outer pass so a `wm.audio.reload`
+            // hot-swap (PRD AC6) takes effect within one frame quantum.
+            let active_detector = wake::read_slot(&wake_slot);
             while let Some(window) = wake_window.next_window() {
                 if !mute.should_run_wake() {
                     continue;
                 }
-                let WakeOutcome::Detected { confidence } = wake_detector.process(&window) else {
+                let WakeOutcome::Detected { confidence } = active_detector.process(&window)
+                else {
                     continue;
                 };
                 if confidence < config.wake_threshold {
                     continue;
                 }
                 let ev = AudioEvent::Wake(WakeDetected {
-                    wake_word: wake_detector.label().to_owned(),
+                    wake_word: active_detector.label().to_owned(),
                     confidence,
                     ts: Timestamp::now(),
                 });
@@ -369,7 +386,12 @@ async fn publish_audio_event(client: &mut Client, ev: &AudioEvent) {
     }
 }
 
-async fn run_control_loop(mut sub: Client, mute: MuteState, shutdown: Shutdown) {
+async fn run_control_loop(
+    mut sub: Client,
+    mute: MuteState,
+    shutdown: Shutdown,
+    wake_slot: WakeSlot,
+) {
     loop {
         if shutdown.is_triggered() {
             return;
@@ -396,12 +418,47 @@ async fn run_control_loop(mut sub: Client, mute: MuteState, shutdown: Shutdown) 
             Some(ControlEvent::TtsEnd) => mute.set(MuteReason::TtsActive, false),
             Some(ControlEvent::MuteRequest) => mute.set(MuteReason::DialogRequest, true),
             Some(ControlEvent::UnmuteRequest) => mute.set(MuteReason::DialogRequest, false),
-            Some(ControlEvent::Reload) => {
-                info!("reload requested; iter-3 will hot-swap ONNX here");
-            }
+            Some(ControlEvent::Reload) => match apply_wake_reload(&ev.data, &wake_slot) {
+                Ok(label) => info!(wake_word = %label, "wake detector hot-swapped"),
+                Err(e) => warn!(error = %e, "wake reload rejected"),
+            },
             None => debug!(topic = %ev.topic, "ignored bus event"),
         }
     }
+}
+
+/// Apply a `wm.audio.reload` payload to the wake-detector slot.
+///
+/// Selects the new wake word from (in order): the payload's
+/// `wake_word` field, then the `WM_WAKE_WORD` env var. Builds a fresh
+/// [`NullWakeDetector`] labelled for that word and swaps it in.
+///
+/// Returns the new label on success; returns [`AudioError::Config`]
+/// if no source provided a value or the value is unknown. Real ONNX
+/// backends will plug in here once the model is loadable.
+///
+/// # Errors
+///
+/// Returns [`AudioError::Config`] for missing or malformed wake-word
+/// identifiers.
+pub fn apply_wake_reload(
+    payload: &serde_json::Value,
+    slot: &WakeSlot,
+) -> Result<String, AudioError> {
+    let chosen = payload
+        .get("wake_word")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| std::env::var("WM_WAKE_WORD").ok())
+        .ok_or_else(|| {
+            AudioError::Config(
+                "reload: no wake_word in payload and WM_WAKE_WORD env not set".to_owned(),
+            )
+        })?;
+    let word = crate::config::WakeWord::parse(&chosen)?;
+    let new: Arc<dyn WakeDetector> = Arc::new(NullWakeDetector::new(word.as_label()));
+    wake::write_slot(slot, new);
+    Ok(word.as_label().to_owned())
 }
 
 async fn install_signal_handlers(shutdown: Shutdown) {
@@ -486,12 +543,41 @@ mod tests {
         let stub = RecordingDetector::default();
         let d = Daemon::new(test_config(), NullSource::default())
             .with_wake_detector(stub.clone());
-        // Use the stored detector to demonstrate the trait object is
-        // callable through the daemon's clone of the Arc.
-        d.wake_detector.process(&[0_i16; WAKE_WINDOW_SAMPLES]);
-        d.wake_detector.process(&[0_i16; WAKE_WINDOW_SAMPLES]);
+        // Read the active detector through the slot the same way the
+        // capture loop does, and exercise it twice.
+        let detector = wake::read_slot(&d.wake_slot());
+        detector.process(&[0_i16; WAKE_WINDOW_SAMPLES]);
+        detector.process(&[0_i16; WAKE_WINDOW_SAMPLES]);
         let seen = stub.seen.lock().map(|g| *g).unwrap_or(0);
         assert_eq!(seen, 2, "trait dispatch should reach the swapped backend");
+    }
+
+    #[test]
+    fn apply_wake_reload_payload_swaps_label() {
+        let d = Daemon::new(test_config(), NullSource::default());
+        let slot = d.wake_slot();
+        assert_eq!(wake::read_slot(&slot).label(), "hey-jarvis");
+        let payload = serde_json::json!({ "wake_word": "okay_nabu" });
+        let label = apply_wake_reload(&payload, &slot).expect("reload should succeed");
+        assert_eq!(label, "okay-nabu");
+        assert_eq!(wake::read_slot(&slot).label(), "okay-nabu");
+    }
+
+    #[test]
+    fn apply_wake_reload_unknown_word_errors_and_keeps_slot() {
+        let d = Daemon::new(test_config(), NullSource::default());
+        let slot = d.wake_slot();
+        let payload = serde_json::json!({ "wake_word": "nope" });
+        let err = apply_wake_reload(&payload, &slot).expect_err("unknown wake word must error");
+        assert!(
+            matches!(err, AudioError::Config(_)),
+            "expected AudioError::Config, got {err:?}"
+        );
+        assert_eq!(
+            wake::read_slot(&slot).label(),
+            "hey-jarvis",
+            "failed reload must leave the active detector untouched",
+        );
     }
 
     /// Stub VAD that returns whatever outcome was prepared, for

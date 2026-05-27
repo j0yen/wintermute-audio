@@ -10,6 +10,12 @@
 //! daemon stays compilable and integration-testable without the
 //! `ort` / model binary dependency. The real `microWakeWord` impl
 //! plugs in behind this trait in a follow-up iteration.
+//!
+//! Hot-swap (PRD AC6) goes through [`WakeSlot`]: a shared
+//! `RwLock<Arc<dyn WakeDetector>>` the capture loop reads on each
+//! window and the control loop overwrites on `wm.audio.reload`.
+
+use std::sync::{Arc, RwLock};
 
 /// Sample rate of the canonical mic stream (mirrors
 /// [`crate::source::SAMPLE_RATE_HZ`]).
@@ -78,6 +84,39 @@ impl WakeDetector for NullWakeDetector {
     fn process(&self, _window: &[i16]) -> WakeOutcome {
         WakeOutcome::NotDetected
     }
+}
+
+/// Shared, swap-able handle to the active wake-word backend.
+///
+/// The capture loop reads it once per window (cheap `Arc::clone`);
+/// the control loop overwrites it on `wm.audio.reload` so the next
+/// inference picks up the new model without dropping mic capture.
+pub type WakeSlot = Arc<RwLock<Arc<dyn WakeDetector>>>;
+
+/// Wrap a detector in a fresh [`WakeSlot`].
+#[must_use]
+pub fn wake_slot(detector: Arc<dyn WakeDetector>) -> WakeSlot {
+    Arc::new(RwLock::new(detector))
+}
+
+/// Read the active detector out of a slot.
+///
+/// Returns a fresh `Arc` so the caller can use the detector after the
+/// lock is dropped (the common pattern in the capture loop). A
+/// poisoned lock is recovered (the data is logically intact — only
+/// the writer's panic state is observed), so the capture loop keeps
+/// running on the last good detector.
+#[must_use]
+pub fn read_slot(slot: &WakeSlot) -> Arc<dyn WakeDetector> {
+    let guard = slot.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    Arc::clone(&*guard)
+}
+
+/// Write a new detector into the slot. Recovers from a poisoned lock
+/// the same way [`read_slot`] does.
+pub fn write_slot(slot: &WakeSlot, detector: Arc<dyn WakeDetector>) {
+    let mut guard = slot.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *guard = detector;
 }
 
 /// Sliding sample buffer that drains complete fixed-size windows on
@@ -232,5 +271,15 @@ mod tests {
         let mut w = WakeWindow::new(0, 0);
         w.push(&[1, 2, 3]);
         assert!(w.next_window().is_none());
+    }
+
+    #[test]
+    fn wake_slot_round_trips_swap() {
+        let first: Arc<dyn WakeDetector> = Arc::new(NullWakeDetector::new("a"));
+        let slot = wake_slot(first);
+        assert_eq!(read_slot(&slot).label(), "a");
+        let second: Arc<dyn WakeDetector> = Arc::new(NullWakeDetector::new("b"));
+        write_slot(&slot, second);
+        assert_eq!(read_slot(&slot).label(), "b");
     }
 }
