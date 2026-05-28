@@ -1,0 +1,106 @@
+# wintermute-audio
+
+Microphone pipeline for the wintermute voice assistant.
+
+`wm-audio` owns everything between the raw mic PCM and "ready-for-STT
+speech chunks". PipeWire's `module-echo-cancel` removes the laptop's
+own TTS from the mic signal; NoiseTorch-ng (optional) suppresses
+keyboard / fan / room noise; **microWakeWord** ONNX runs on the
+cleaned stream for low-CPU wake detection; **Silero VAD** detects
+utterance boundaries; events fan out on agorabus and PCM frames fan
+out on a Unix socket so STT, wake, VAD, and any future
+speaker-diarization service all read from one canonical capture
+stream.
+
+This is the **audio** component of Fleet 1 of the wintermute vision.
+
+## What it does
+
+On startup, `wm-audio`:
+
+- Opens the configured input node (`WM_MIC_NODE` from
+  `/etc/wintermute/conf.d/00-bootstrap.env`), routed through
+  PipeWire's AEC and (optionally) NoiseTorch.
+- Resamples to 16 kHz mono PCM if needed.
+- Spawns three async consumers of the shared ring buffer:
+  - **socket fanout** — accepts UDS connections at
+    `$XDG_RUNTIME_DIR/wintermute/mic.sock` and pushes PCM frames to
+    each subscriber.
+  - **wake** — runs microWakeWord ONNX inference every 80 ms on a
+    1280-sample window.
+  - **VAD** — runs Silero VAD ONNX every 32 ms; emits `speech.start`
+    on rising edge with hangover, `speech.end` on 500-ms-confirmed
+    silence.
+
+Send `wm.audio.reload` on agorabus to hot-swap the wake word; the
+daemon re-reads env and swaps the ONNX model without restarting.
+
+## Events published
+
+| Topic | Payload |
+|---|---|
+| `wm.audio.wake` | `{wake_word, confidence, ts}` |
+| `wm.audio.speech.start` | `{ts}` |
+| `wm.audio.speech.chunk` | `{seq, pcm_b64, ts}` |
+| `wm.audio.speech.end` | `{duration_ms, ts}` |
+| `wm.audio.mute` / `wm.audio.unmute` | `{ts}` |
+
+## Events subscribed
+
+| Topic | Behavior |
+|---|---|
+| `wm.tts.start` | mute wake detection (AEC tail guard) |
+| `wm.tts.end` | unmute wake detection |
+| `wm.dialog.mute_request` | mute mic entirely |
+| `wm.dialog.unmute_request` | unmute |
+
+## Acceptance tests
+
+1. With `wm-tts` playing a 5-second sentence over speakers, the wake
+   word does not fire across 30 repetitions. (AEC working.)
+2. Typing on the keyboard while the mic is open reduces input level
+   by ≥10 dB vs. AEC-only mode (NoiseTorch).
+3. Wake → `wm.audio.wake` publish latency: <200 ms.
+4. End-of-speech → `wm.audio.speech.end` latency: <500 ms after
+   confirmed silence.
+5. False-accept rate on 60 min of ambient living-room speech: <0.5/hr.
+6. `wm.audio.reload` completes in <2 s without dropping capture.
+7. Two simultaneous mic.sock subscribers consume PCM for 60 min
+   without dropouts.
+8. Daemon recovers from `systemctl --user restart pipewire` within 5 s.
+
+## Install
+
+One-liner (curl-pipe):
+
+```
+curl -fsSL https://raw.githubusercontent.com/j0yen/wintermute-audio/main/install.sh | bash
+```
+
+Or from a checkout:
+
+```
+git clone https://github.com/j0yen/wintermute-audio
+cd wintermute-audio
+./install.sh
+```
+
+The default build links against `pipewire` + `onnxruntime` system
+libraries; install both before running `install.sh`.
+
+Drop the PipeWire AEC config (see `contrib/pipewire/`) into
+`~/.config/pipewire/pipewire.conf.d/99-wintermute.conf` and restart
+PipeWire (`systemctl --user restart pipewire`). Place the
+microWakeWord + Silero VAD ONNX models under
+`/usr/share/wintermute/models/`.
+
+Start the daemon:
+
+```
+wm-audio start                         # uses bootstrap env
+WM_WAKE_WORD=hey_jarvis wm-audio start # explicit wake word
+```
+
+## License
+
+Dual-licensed under MIT or Apache-2.0 at your option.
