@@ -169,7 +169,7 @@ impl WakeWindow {
 
     /// How many samples are currently buffered.
     #[must_use]
-    pub fn buffered(&self) -> usize {
+    pub const fn buffered(&self) -> usize {
         self.buf.len()
     }
 
@@ -195,7 +195,7 @@ impl WakeWindow {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::indexing_slicing)]
+    #![allow(clippy::indexing_slicing, clippy::many_single_char_names)]
 
     use super::*;
 

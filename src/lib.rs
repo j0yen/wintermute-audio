@@ -1,22 +1,29 @@
 //! wintermute-audio — mic → AEC/NS → wake/VAD → agorabus events.
 //!
-//! Through iter-3 the daemon skeleton wires:
+//! v0.2.0 wires the daemon end-to-end:
 //!
-//! * Strongly-typed event vocabulary for the topics in PRD §2.3.
+//! * Strongly-typed event vocabulary for the topics in PRD §2.3,
+//!   including the v0.2.0 capture lifecycle events
+//!   (`wm.audio.capture.start`, `wm.audio.capture.end`,
+//!   `wm.audio.error`).
 //! * A `MicSource` trait abstracting the capture device so `PipeWire`,
 //!   file replay, and tests can all drive the pipeline uniformly.
+//! * A shipping default [`SupervisedPwRecord`] source that spawns
+//!   `pw-record` (PRD-pipewire-input §2.1), reads 320-sample i16
+//!   frames off stdout, and respawns with 1 s / 2 s / 4 s / … 30 s
+//!   backoff so capture is a persistent service.
 //! * A UDS PCM fanout (broadcast channel + per-connection writer task)
 //!   serving the canonical 16 kHz mono stream to N subscribers.
 //! * An `agorabus` client connector that publishes the lifecycle events
 //!   and subscribes to TTS / dialog control topics, driving a mute
-//!   state machine.
+//!   state machine. Self-emitted topic echoes (`wm.audio.error`, …)
+//!   are silently dropped — see [`events::is_self_emitted_topic`].
 //! * Graceful shutdown via tokio signal + a [`Shutdown`] handle that
 //!   integration tests can flip without raising real signals.
 //!
-//! The actual wake-word (`microWakeWord`) and VAD (`Silero`) ONNX
-//! inference, plus the `PipeWire` capture implementation, are deferred
-//! to subsequent iterations. They plug in behind [`MicSource`] /
-//! [`fanout::channel`] without disturbing the topology built here.
+//! Wake-word (`microWakeWord`) and VAD (`Silero`) ONNX inference plug
+//! in behind [`WakeDetector`] / [`VadDetector`] and remain follow-on
+//! PRD scope.
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
@@ -30,14 +37,19 @@ pub mod state;
 pub mod vad;
 pub mod wake;
 
-pub use config::Config;
-pub use daemon::{Daemon, run};
+pub use config::{Config, DEFAULT_PW_RECORD};
+pub use daemon::{CapturedBytes, Daemon};
 pub use errors::AudioError;
 pub use events::{
-    AudioEvent, ControlEvent, MuteSource, SpeechChunk, SpeechEnd, SpeechStart, Timestamp,
-    Topics, WakeDetected,
+    AudioErrorPayload, AudioEvent, CaptureEnd, CaptureStart, ControlEvent, MuteSource,
+    SpeechChunk, SpeechEnd, SpeechStart, Timestamp, Topics, WakeDetected,
+    is_self_emitted_topic,
 };
-pub use source::{MicSource, NullSource, PcmFrame, SourceMeta};
+pub use source::{
+    MicNodeSelection, MicSource, NullSource, PW_RECORD_FRAME_SAMPLES, PcmFrame,
+    PwRecordSource, SourceMeta, SupervisedPwRecord, backoff_ms_for_attempt, pw_record_args,
+    resolve_mic_node,
+};
 pub use state::{MuteReason, MuteState, Shutdown};
 pub use vad::{
     NullVadDetector, SPEECH_END_HANGOVER_MS, SpeechEdge, VAD_FRAME_MS, VAD_STRIDE_SAMPLES,

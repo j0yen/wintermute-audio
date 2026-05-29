@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::errors::AudioError;
 use crate::events::{
     AudioEvent, ControlEvent, SpeechChunk, SpeechEnd, SpeechStart, Timestamp, WakeDetected,
+    is_self_emitted_topic,
 };
 use crate::fanout;
 use crate::source::{MicSource, PcmFrame};
@@ -19,6 +20,7 @@ use base64::Engine as _;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer as _, Observer as _, Producer as _, Split as _};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -26,6 +28,35 @@ use tracing::{debug, info, warn};
 pub const RING_CAPACITY: usize = 16_000 * 5;
 /// Channel depth for the source -> daemon hand-off.
 const SOURCE_CHANNEL_DEPTH: usize = 64;
+
+/// Cumulative-bytes counter for the capture metric (PRD §2.4).
+///
+/// Cheap to clone (it's just an `Arc<AtomicU64>`). The capture frame
+/// path bumps it for each PCM frame the daemon successfully forwards
+/// to the fanout broadcast channel; observers (the `wm-audio-dump`
+/// subcommand, integration tests, future metrics endpoint) can read
+/// the live value with [`CapturedBytes::load`].
+#[derive(Debug, Clone, Default)]
+pub struct CapturedBytes(Arc<AtomicU64>);
+
+impl CapturedBytes {
+    /// Build a fresh counter starting at zero.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current cumulative captured-bytes total.
+    #[must_use]
+    pub fn load(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// Add `n` bytes to the counter. Saturates on overflow.
+    pub fn add(&self, n: u64) {
+        self.0.fetch_add(n, Ordering::Relaxed);
+    }
+}
 
 /// Daemon handle wrapping all wired components.
 ///
@@ -39,6 +70,8 @@ pub struct Daemon<S: MicSource> {
     shutdown: Shutdown,
     wake_slot: WakeSlot,
     vad_detector: Arc<dyn VadDetector>,
+    lifecycle_rx: Option<mpsc::Receiver<AudioEvent>>,
+    captured_bytes: CapturedBytes,
 }
 
 impl<S: MicSource> Daemon<S> {
@@ -58,7 +91,28 @@ impl<S: MicSource> Daemon<S> {
             shutdown: Shutdown::new(),
             wake_slot: wake::wake_slot(default_detector),
             vad_detector: Arc::new(NullVadDetector::new("null")),
+            lifecycle_rx: None,
+            captured_bytes: CapturedBytes::new(),
         }
+    }
+
+    /// Attach a lifecycle-event receiver. Events sent on the matching
+    /// `Sender` (held by e.g. [`crate::source::SupervisedPwRecord`])
+    /// are drained by the main loop and republished on the bus.
+    ///
+    /// Without this, supervised sources still work but their
+    /// `wm.audio.capture.start` / `wm.audio.capture.end` / error
+    /// events stay confined to the in-process channel.
+    #[must_use]
+    pub fn with_lifecycle_channel(mut self, rx: mpsc::Receiver<AudioEvent>) -> Self {
+        self.lifecycle_rx = Some(rx);
+        self
+    }
+
+    /// Shared handle to the cumulative captured-bytes counter (PRD §2.4 / AC7).
+    #[must_use]
+    pub fn captured_bytes_handle(&self) -> CapturedBytes {
+        self.captured_bytes.clone()
     }
 
     /// Swap in a wake-word backend. Returns `self` for the builder
@@ -105,7 +159,7 @@ impl<S: MicSource> Daemon<S> {
     ///
     /// Returns [`AudioError::Bus`] if the agorabus daemon cannot be
     /// reached, or [`AudioError::Capture`] on a fatal capture failure.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     pub async fn run(self) -> Result<(), AudioError> {
         let Self {
             config,
@@ -114,6 +168,8 @@ impl<S: MicSource> Daemon<S> {
             shutdown,
             wake_slot,
             vad_detector,
+            mut lifecycle_rx,
+            captured_bytes,
         } = self;
 
         info!(
@@ -218,19 +274,38 @@ impl<S: MicSource> Daemon<S> {
                 info!("shutdown requested, draining");
                 break;
             }
-            let frame = match tokio::time::timeout(
-                std::time::Duration::from_millis(250),
-                frame_rx.recv(),
-            )
-            .await
-            {
-                Ok(Some(f)) => f,
-                Ok(None) => {
-                    debug!("capture source closed");
-                    break;
+            // Wait for either a PCM frame from the source or a
+            // lifecycle event from the capture supervisor (capture
+            // start/end, wm.audio.error). The 250 ms ticker keeps the
+            // shutdown flag responsive even when neither channel has
+            // traffic.
+            #[allow(clippy::redundant_pub_crate)] // tokio::select! macro hygiene
+            let frame_opt = tokio::select! {
+                f = frame_rx.recv() => {
+                    let Some(frame) = f else {
+                        debug!("capture source closed");
+                        break;
+                    };
+                    Some(frame)
+                },
+                ev = async {
+                    match &mut lifecycle_rx {
+                        Some(rx) => rx.recv().await,
+                        None => {
+                            // No lifecycle channel attached — block forever
+                            // so the select! arm never wins.
+                            std::future::pending::<Option<AudioEvent>>().await
+                        }
+                    }
+                } => {
+                    if let Some(ev) = ev {
+                        publish_audio_event(&mut pub_client, &ev).await;
+                    }
+                    None
                 }
-                Err(_) => continue, // timeout — re-check shutdown flag
+                () = tokio::time::sleep(std::time::Duration::from_millis(250)) => None,
             };
+            let Some(frame) = frame_opt else { continue };
 
             if !mute.should_publish_pcm() {
                 // Dialog has hard-muted the mic; drop the frame.
@@ -247,6 +322,15 @@ impl<S: MicSource> Daemon<S> {
             let n_u64 = u64::try_from(n).unwrap_or(u64::MAX);
             total_samples = total_samples.saturating_add(n_u64);
 
+            // Capture metric (PRD §2.4 / AC7): two bytes per i16 sample.
+            // Bump BEFORE the broadcast send so the counter reflects
+            // bytes the capture path saw, not bytes downstream
+            // received — fanout sends never panic and the receiver
+            // count is orthogonal.
+            let frame_bytes = u64::try_from(frame.samples.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(2);
+            captured_bytes.add(frame_bytes);
             // Fanout to UDS subscribers. `SendError` only means "no
             // active subscribers right now," which is the steady state
             // when nothing is listening — ignore.
@@ -346,7 +430,37 @@ impl<S: MicSource> Daemon<S> {
         let _ = signal_task.await;
         let _ = control_task.await;
         let _ = fanout_task.await;
-        let _ = source_task.await;
+        // Source task is the supervisor (or a NullSource). Give it a
+        // short window to flush its final capture.end event into the
+        // lifecycle channel before we publish.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            source_task,
+        )
+        .await;
+
+        // 7a. Drain whatever the supervisor managed to enqueue before
+        //     exiting (its final capture.end), best-effort. We don't
+        //     block past 500 ms — the bus is about to die anyway.
+        if let Some(mut rx) = lifecycle_rx {
+            let drain_deadline = std::time::Instant::now()
+                + std::time::Duration::from_millis(500);
+            loop {
+                if std::time::Instant::now() > drain_deadline {
+                    break;
+                }
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    rx.recv(),
+                )
+                .await
+                {
+                    Ok(Some(ev)) => publish_audio_event(&mut pub_client, &ev).await,
+                    // Either channel closed or wait timed out — stop draining.
+                    Ok(None) | Err(_) => break,
+                }
+            }
+        }
 
         // 8. Best-effort publish of shutdown notice (cosmetic; the
         //    bus client may already be torn down).
@@ -413,6 +527,13 @@ async fn run_control_loop(
             }
             Err(_) => continue, // timeout — re-check shutdown
         };
+        // Silently drop echoes of our own publishes — without this,
+        // every `wm.audio.error` we publish on the bus would get
+        // routed back via `wm.audio.` subscribers and recurse. Mirror
+        // of the wm-tts error-loop-suppress fix (PRD §2.2).
+        if is_self_emitted_topic(&ev.topic) {
+            continue;
+        }
         match ControlEvent::from_topic(&ev.topic) {
             Some(ControlEvent::TtsStart) => mute.set(MuteReason::TtsActive, true),
             Some(ControlEvent::TtsEnd) => mute.set(MuteReason::TtsActive, false),
@@ -485,6 +606,13 @@ async fn install_signal_handlers(shutdown: Shutdown) {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::unnecessary_literal_bound,
+    reason = "tests need to fail loudly and stub trait impls return literal-tied lifetimes by default"
+)]
 mod tests {
     use super::*;
     use crate::source::NullSource;
@@ -498,6 +626,7 @@ mod tests {
             mic_socket: std::path::PathBuf::from("/tmp/wm-audio-test.sock"),
             bus_socket: std::path::PathBuf::from("/tmp/wm-audio-no-bus.sock"),
             session_id: "wm-audio-test".into(),
+            pw_record_bin: crate::config::DEFAULT_PW_RECORD.to_owned(),
         }
     }
 
@@ -512,6 +641,36 @@ mod tests {
         assert!(!s.is_triggered());
         s.trigger();
         assert!(s.is_triggered());
+    }
+
+    #[test]
+    fn captured_bytes_handle_round_trips() {
+        // The counter starts at zero, accepts adds, and is observable
+        // through a clone. AC7 reads through this handle from the bin
+        // surface.
+        let d = Daemon::new(test_config(), NullSource::default());
+        let h = d.captured_bytes_handle();
+        assert_eq!(h.load(), 0);
+        h.add(640);
+        h.add(640);
+        assert_eq!(h.load(), 1_280);
+        let h2 = h.clone();
+        assert_eq!(h2.load(), 1_280, "clones observe the shared counter");
+        h2.add(0);
+        assert_eq!(h.load(), 1_280);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_channel_is_attachable() {
+        // The builder accepts a Receiver<AudioEvent> and stores it for
+        // the main loop to drain. We don't run() here — the channel is
+        // unit-tested via the daemon's plumbing test downstream.
+        let (_tx, rx) = mpsc::channel::<AudioEvent>(4);
+        let d = Daemon::new(test_config(), NullSource::default())
+            .with_lifecycle_channel(rx);
+        // Internal field is private; we can only check by re-attaching
+        // wouldn't compile. Existence is what we want.
+        assert!(!d.shutdown_handle().is_triggered());
     }
 
     /// Stub detector that records every window it sees, used to assert

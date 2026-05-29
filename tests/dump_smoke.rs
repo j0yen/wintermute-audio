@@ -135,6 +135,6 @@ fn unique_tempdir(label: &str) -> PathBuf {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let dir = std::env::temp_dir().join(format!("{label}-{pid}-{nanos}"));
-    assert!(!Path::new(&dir).exists(), "tempdir collision: {dir:?}");
+    assert!(!Path::new(&dir).exists(), "tempdir collision: {}", dir.display());
     dir
 }

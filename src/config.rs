@@ -48,6 +48,12 @@ impl WakeWord {
     }
 }
 
+/// Default `pw-record` binary name on `$PATH`.
+///
+/// PRD §5: overridable via `WM_PW_RECORD_BIN` so tests / packaging
+/// can substitute. Mirror of `wm-tts`'s `WM_PW_CAT_BIN`.
+pub const DEFAULT_PW_RECORD: &str = "pw-record";
+
 /// Daemon configuration assembled from environment + sensible defaults.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -63,6 +69,10 @@ pub struct Config {
     pub bus_socket: PathBuf,
     /// Session id this daemon announces on the bus.
     pub session_id: String,
+    /// Path to the `pw-record` binary (PRD §5). Overridable via
+    /// `WM_PW_RECORD_BIN`; defaults to `"pw-record"` (resolved on
+    /// `$PATH`).
+    pub pw_record_bin: String,
 }
 
 impl Config {
@@ -120,6 +130,9 @@ impl Config {
         let session_id = std::env::var("WM_AUDIO_SESSION")
             .unwrap_or_else(|_| format!("wm-audio-{}", std::process::id()));
 
+        let pw_record_bin = std::env::var("WM_PW_RECORD_BIN")
+            .unwrap_or_else(|_| DEFAULT_PW_RECORD.to_owned());
+
         Ok(Self {
             mic_node,
             wake_word,
@@ -127,6 +140,7 @@ impl Config {
             mic_socket,
             bus_socket,
             session_id,
+            pw_record_bin,
         })
     }
 }
