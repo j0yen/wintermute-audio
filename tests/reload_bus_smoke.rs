@@ -93,6 +93,7 @@ async fn run_reload_lifecycle() -> Result<(), String> {
         mic_socket: mic_sock.clone(),
         bus_socket: bus_sock.clone(),
         session_id: format!("wm-audio-reload-smoke-{}", std::process::id()),
+        pw_record_bin: wintermute_audio::DEFAULT_PW_RECORD.to_owned(),
     };
 
     // 4. Enough frames that the daemon's main loop is still alive while
@@ -222,6 +223,7 @@ async fn run_reload_timing() -> Result<std::time::Duration, String> {
         mic_socket: mic_sock.clone(),
         bus_socket: bus_sock.clone(),
         session_id: session_id.clone(),
+        pw_record_bin: wintermute_audio::DEFAULT_PW_RECORD.to_owned(),
     };
 
     // Long enough that the source task is still draining while we measure.
@@ -247,7 +249,7 @@ async fn run_reload_timing() -> Result<std::time::Duration, String> {
         loop {
             if let Ok(peers) = publisher.peers().await {
                 if peers.iter().any(|p| p.session_id == sub_session_id) {
-                    return ();
+                    return;
                 }
             }
             tokio::time::sleep(Duration::from_millis(20)).await;

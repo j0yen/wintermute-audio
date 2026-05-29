@@ -126,7 +126,7 @@ impl VadWindow {
 
     /// How many samples are currently buffered.
     #[must_use]
-    pub fn buffered(&self) -> usize {
+    pub const fn buffered(&self) -> usize {
         self.buf.len()
     }
 
@@ -292,7 +292,7 @@ impl VadEdgeTracker {
 
     /// Force a reset — caller may use at mute edges or hot-swap so the
     /// next utterance does not inherit stale state.
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.state = TrackerState::Silent;
     }
 

@@ -123,6 +123,7 @@ async fn run_wake_lifecycle() -> Result<(), String> {
         mic_socket: mic_sock.clone(),
         bus_socket: bus_sock.clone(),
         session_id: format!("wm-audio-wake-smoke-{}", std::process::id()),
+        pw_record_bin: wintermute_audio::DEFAULT_PW_RECORD.to_owned(),
     };
 
     // 4. NullSource frame math:
@@ -320,6 +321,7 @@ async fn run_wake_timing() -> Result<Duration, String> {
         mic_socket: mic_sock.clone(),
         bus_socket: bus_sock.clone(),
         session_id: format!("wm-audio-wake-timing-{}", std::process::id()),
+        pw_record_bin: wintermute_audio::DEFAULT_PW_RECORD.to_owned(),
     };
 
     let fired_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));

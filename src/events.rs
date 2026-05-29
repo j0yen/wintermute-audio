@@ -31,6 +31,39 @@ impl Topics {
     pub const UNMUTE: &'static str = "wm.audio.unmute";
     /// Hot-swap signal (re-read env, swap ONNX models).
     pub const RELOAD: &'static str = "wm.audio.reload";
+    /// Capture session began (after `pw-record` spawn).
+    pub const CAPTURE_START: &'static str = "wm.audio.capture.start";
+    /// Capture session ended (graceful stop or `pw-record` exit).
+    pub const CAPTURE_END: &'static str = "wm.audio.capture.end";
+    /// Capture / configuration failure (e.g. `pw-record` missing,
+    /// `WM_MIC_NODE` unresolvable and no fallback available).
+    pub const ERROR: &'static str = "wm.audio.error";
+    /// Daemon-shutdown notice (best-effort; published during teardown).
+    pub const SHUTDOWN: &'static str = "wm.audio.shutdown";
+
+    /// Every outbound topic this daemon publishes.
+    ///
+    /// Used by the dispatch loop to silently skip events whose topic
+    /// matches one of our own publishes. Without this filter, the
+    /// broadcast bus echoes our `wm.audio.error` back to us, the
+    /// control-event classifier rejects it as an unknown topic, and we
+    /// would publish another `wm.audio.error` describing the rejection
+    /// — the recursive storm template that bit `wm-tts` before
+    /// PRD-wintermute-tts-error-loop-suppress shipped. See
+    /// PRD-wintermute-audio-pipewire-input §2.2 for the analogous
+    /// requirement on the input side.
+    pub const ALL_OUTBOUND: &'static [&'static str] = &[
+        Self::WAKE,
+        Self::SPEECH_START,
+        Self::SPEECH_CHUNK,
+        Self::SPEECH_END,
+        Self::MUTE,
+        Self::UNMUTE,
+        Self::CAPTURE_START,
+        Self::CAPTURE_END,
+        Self::ERROR,
+        Self::SHUTDOWN,
+    ];
 
     // Subscribed topics
     /// TTS playback began (mute wake to avoid double-fire).
@@ -106,6 +139,48 @@ pub struct SpeechEnd {
     pub ts: Timestamp,
 }
 
+/// `wm.audio.capture.start` payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureStart {
+    /// Resolved mic node — either the configured one when available
+    /// or the literal `"default"` if `WM_MIC_NODE` was empty or
+    /// fell back to the `PipeWire` default.
+    pub mic: String,
+    /// Capture sample rate in Hz.
+    pub rate: u32,
+    /// Channel count.
+    pub channels: u16,
+    /// Start timestamp.
+    pub ts: Timestamp,
+}
+
+/// `wm.audio.capture.end` payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureEnd {
+    /// Outcome — `"ok"` for clean stop, `"error"` for crash/exit-nonzero.
+    pub outcome: String,
+    /// Wall-clock duration of the capture session, in milliseconds.
+    pub dur_ms: u64,
+    /// Free-form reason code (exit code, signal name, "shutdown").
+    pub reason: String,
+    /// End timestamp.
+    pub ts: Timestamp,
+}
+
+/// `wm.audio.error` payload — emitted on configuration or spawn
+/// failures (e.g. `pw-record` binary missing). Mirrors the
+/// `wm.tts.error` shape from the sibling PRD.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioErrorPayload {
+    /// Short machine-readable error class (`pw_record_missing`,
+    /// `mic_node_fallback`, `spawn_failed`, …).
+    pub kind: String,
+    /// Human-readable explanation.
+    pub message: String,
+    /// Emission timestamp.
+    pub ts: Timestamp,
+}
+
 /// Tagged source of a mute/unmute transition (informational; not part of
 /// the bus payload, which carries only `{ts}` per PRD).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +217,12 @@ pub enum AudioEvent {
         /// Timestamp the unmute took effect.
         ts: Timestamp,
     },
+    /// Capture session began.
+    CaptureStart(CaptureStart),
+    /// Capture session ended.
+    CaptureEnd(CaptureEnd),
+    /// Configuration / spawn failure.
+    Error(AudioErrorPayload),
 }
 
 impl AudioEvent {
@@ -155,6 +236,9 @@ impl AudioEvent {
             Self::SpeechEnd(_) => Topics::SPEECH_END,
             Self::Mute { .. } => Topics::MUTE,
             Self::Unmute { .. } => Topics::UNMUTE,
+            Self::CaptureStart(_) => Topics::CAPTURE_START,
+            Self::CaptureEnd(_) => Topics::CAPTURE_END,
+            Self::Error(_) => Topics::ERROR,
         }
     }
 
@@ -172,8 +256,22 @@ impl AudioEvent {
             Self::SpeechChunk(c) => serde_json::to_value(c),
             Self::SpeechEnd(e) => serde_json::to_value(e),
             Self::Mute { ts } | Self::Unmute { ts } => Ok(serde_json::json!({ "ts": ts })),
+            Self::CaptureStart(c) => serde_json::to_value(c),
+            Self::CaptureEnd(e) => serde_json::to_value(e),
+            Self::Error(e) => serde_json::to_value(e),
         }
     }
+}
+
+/// Returns `true` iff `topic` is one of the daemon's own outbound topics.
+///
+/// Used by the control loop to silently skip echoes of `wm.audio.*`
+/// publishes that come back through our `wm.audio.reload` subscription.
+/// Mirror of the `wm-tts` defense; see [`Topics::ALL_OUTBOUND`] for the
+/// full list.
+#[must_use]
+pub fn is_self_emitted_topic(topic: &str) -> bool {
+    Topics::ALL_OUTBOUND.contains(&topic)
 }
 
 /// Events this daemon subscribes to (control plane).
@@ -270,6 +368,123 @@ mod tests {
         let obj_len = v.as_object().map_or(0, serde_json::Map::len);
         assert_eq!(obj_len, 1, "PRD says mute payload is just {{ts}}");
         assert_eq!(v["ts"], 99);
+    }
+
+    #[test]
+    fn capture_start_payload_shape() {
+        let ev = AudioEvent::CaptureStart(CaptureStart {
+            mic: "alsa_input.fake".into(),
+            rate: 16_000,
+            channels: 1,
+            ts: Timestamp(7),
+        });
+        assert_eq!(ev.topic(), "wm.audio.capture.start");
+        let v = ev.payload().ok().unwrap_or(serde_json::Value::Null);
+        assert_eq!(v["mic"], "alsa_input.fake");
+        assert_eq!(v["rate"], 16_000);
+        assert_eq!(v["channels"], 1);
+        assert_eq!(v["ts"], 7);
+    }
+
+    #[test]
+    fn capture_end_payload_shape() {
+        let ev = AudioEvent::CaptureEnd(CaptureEnd {
+            outcome: "ok".into(),
+            dur_ms: 1234,
+            reason: "shutdown".into(),
+            ts: Timestamp(8),
+        });
+        assert_eq!(ev.topic(), "wm.audio.capture.end");
+        let v = ev.payload().ok().unwrap_or(serde_json::Value::Null);
+        assert_eq!(v["outcome"], "ok");
+        assert_eq!(v["dur_ms"], 1234);
+        assert_eq!(v["reason"], "shutdown");
+        assert_eq!(v["ts"], 8);
+    }
+
+    #[test]
+    fn audio_error_payload_shape() {
+        let ev = AudioEvent::Error(AudioErrorPayload {
+            kind: "pw_record_missing".into(),
+            message: "spawn failed: /nonexistent".into(),
+            ts: Timestamp(9),
+        });
+        assert_eq!(ev.topic(), "wm.audio.error");
+        let v = ev.payload().ok().unwrap_or(serde_json::Value::Null);
+        assert_eq!(v["kind"], "pw_record_missing");
+        assert_eq!(v["ts"], 9);
+    }
+
+    #[test]
+    fn is_self_emitted_topic_flags_every_outbound() {
+        // Sibling-of-wm-tts defense: every Self::topic() variant must be
+        // recognised by the dispatch loop's self-echo filter. If a new
+        // outbound topic ships without updating Topics::ALL_OUTBOUND,
+        // this test trips before the live recursion does.
+        for t in Topics::ALL_OUTBOUND {
+            assert!(is_self_emitted_topic(t), "outbound topic {t} must be flagged self-emitted");
+        }
+        // And every AudioEvent variant's topic must also be in the list.
+        let canon = [
+            AudioEvent::Wake(WakeDetected {
+                wake_word: "hey-jarvis".into(),
+                confidence: 0.5,
+                ts: Timestamp(0),
+            })
+            .topic(),
+            AudioEvent::SpeechStart(SpeechStart { ts: Timestamp(0) }).topic(),
+            AudioEvent::SpeechChunk(SpeechChunk {
+                seq: 0,
+                pcm_b64: String::new(),
+                ts: Timestamp(0),
+            })
+            .topic(),
+            AudioEvent::SpeechEnd(SpeechEnd {
+                duration_ms: 0,
+                ts: Timestamp(0),
+            })
+            .topic(),
+            AudioEvent::Mute { ts: Timestamp(0) }.topic(),
+            AudioEvent::Unmute { ts: Timestamp(0) }.topic(),
+            AudioEvent::CaptureStart(CaptureStart {
+                mic: String::new(),
+                rate: 16_000,
+                channels: 1,
+                ts: Timestamp(0),
+            })
+            .topic(),
+            AudioEvent::CaptureEnd(CaptureEnd {
+                outcome: "ok".into(),
+                dur_ms: 0,
+                reason: String::new(),
+                ts: Timestamp(0),
+            })
+            .topic(),
+            AudioEvent::Error(AudioErrorPayload {
+                kind: String::new(),
+                message: String::new(),
+                ts: Timestamp(0),
+            })
+            .topic(),
+        ];
+        for t in canon {
+            assert!(is_self_emitted_topic(t), "AudioEvent topic {t} must be self-emitted");
+        }
+    }
+
+    #[test]
+    fn is_self_emitted_topic_does_not_flag_inbound() {
+        // wm.audio.reload is inbound only — it's a control event the
+        // daemon reacts to, not one it publishes.
+        assert!(!is_self_emitted_topic(Topics::RELOAD));
+        assert!(!is_self_emitted_topic(Topics::TTS_START));
+        assert!(!is_self_emitted_topic(Topics::TTS_END));
+        assert!(!is_self_emitted_topic(Topics::DIALOG_MUTE_REQ));
+        assert!(!is_self_emitted_topic(Topics::DIALOG_UNMUTE_REQ));
+        assert!(!is_self_emitted_topic(""));
+        assert!(!is_self_emitted_topic("wm.audio."));
+        // Substring-not-equal check: capture.start.detail must not match.
+        assert!(!is_self_emitted_topic("wm.audio.capture.start.detail"));
     }
 
     #[test]

@@ -31,6 +31,11 @@ confidence-threshold = 0.8
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# In-tree path dependencies (e.g. agorabus, sibling wintermute crates)
+# don't ship version constraints and would be flagged as wildcards
+# otherwise; this exemption is safe because path deps are version-pinned
+# by the workspace checkout itself.
+allow-wildcard-paths = true
 deny = [
   # Crates that have caused real-world soundness or supply-chain incidents,
   # or whose usage is a strong smell in any new project.

@@ -2,7 +2,7 @@
 # Lints themselves are declared in Cargo.toml [lints.clippy] (strict by default).
 
 avoid-breaking-exported-api = false
-msrv = "1.85"
+msrv = "1.88"
 
 # Tighten thresholds where the default is overly permissive for generated code.
 cognitive-complexity-threshold = 20
