@@ -482,30 +482,40 @@ impl MicSource for SupervisedPwRecord {
                     .map_or(0_u64, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
                     .saturating_sub(start_ms);
 
-                let (outcome, reason) = match &run_outcome {
-                    Ok(()) => ("ok".to_owned(), "shutdown_or_eof".to_owned()),
-                    Err(AudioError::Capture(msg)) if msg.contains("pw_record_missing") => {
-                        // Also emit the dedicated error envelope for AC10.
-                        let err_ev = AudioEvent::Error(AudioErrorPayload {
-                            kind: "pw_record_missing".to_owned(),
-                            message: msg.clone(),
-                            ts: Timestamp::now(),
-                        });
-                        if let Err(e) = self.lifecycle_tx.send(err_ev).await {
-                            debug!(error = %e, "pw_record_missing error could not be enqueued");
+                // If shutdown is in flight, treat whatever pw-record
+                // did on its way out as a graceful stop (kill_on_drop
+                // from our side will surface as a non-zero exit, but
+                // that's our SIGTERM, not a real fault). PRD AC6: ok
+                // on graceful stop.
+                let shutdown_in_flight = self.shutdown.is_triggered();
+                let (outcome, reason) = if shutdown_in_flight {
+                    ("ok".to_owned(), "shutdown".to_owned())
+                } else {
+                    match &run_outcome {
+                        Ok(()) => ("ok".to_owned(), "eof".to_owned()),
+                        Err(AudioError::Capture(msg)) if msg.contains("pw_record_missing") => {
+                            // Also emit the dedicated error envelope for AC10.
+                            let err_ev = AudioEvent::Error(AudioErrorPayload {
+                                kind: "pw_record_missing".to_owned(),
+                                message: msg.clone(),
+                                ts: Timestamp::now(),
+                            });
+                            if let Err(e) = self.lifecycle_tx.send(err_ev).await {
+                                debug!(error = %e, "pw_record_missing error could not be enqueued");
+                            }
+                            ("error".to_owned(), "pw_record_missing".to_owned())
                         }
-                        ("error".to_owned(), "pw_record_missing".to_owned())
-                    }
-                    Err(e) => {
-                        let err_ev = AudioEvent::Error(AudioErrorPayload {
-                            kind: "spawn_failed".to_owned(),
-                            message: format!("{e}"),
-                            ts: Timestamp::now(),
-                        });
-                        if let Err(send_err) = self.lifecycle_tx.send(err_ev).await {
-                            debug!(error = %send_err, "spawn_failed error could not be enqueued");
+                        Err(e) => {
+                            let err_ev = AudioEvent::Error(AudioErrorPayload {
+                                kind: "spawn_failed".to_owned(),
+                                message: format!("{e}"),
+                                ts: Timestamp::now(),
+                            });
+                            if let Err(send_err) = self.lifecycle_tx.send(err_ev).await {
+                                debug!(error = %send_err, "spawn_failed error could not be enqueued");
+                            }
+                            ("error".to_owned(), format!("{e}"))
                         }
-                        ("error".to_owned(), format!("{e}"))
                     }
                 };
                 let end_ev = AudioEvent::CaptureEnd(CaptureEnd {

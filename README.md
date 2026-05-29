@@ -14,6 +14,18 @@ stream.
 
 This is the **audio** component of Fleet 1 of the wintermute vision.
 
+## Recent
+
+- **v0.2.0 (2026-05-28)** — live PipeWire capture ships. The daemon
+  now spawns `pw-record` as the default mic source, streams 16 kHz
+  mono i16 frames into the UDS fanout, and emits a
+  `wm.audio.capture.{start,end}` envelope pair (plus `wm.audio.error`
+  for `pw_record_missing` / `mic_node_fallback`). Capture is a
+  persistent service — `pw-record` exit triggers retry with 1 s /
+  2 s / 4 s / … capped-at-30 s exponential backoff. Mirror of the
+  same-day `wintermute-tts` PipeWire-output ship; see
+  PRD-wintermute-audio-pipewire-input.
+
 ## What it does
 
 On startup, `wm-audio`:
