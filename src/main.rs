@@ -10,7 +10,8 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use wintermute_audio::{
-    AudioEvent, Config, Daemon, MicNodeSelection, SupervisedPwRecord, resolve_mic_node,
+    AecProbe, AudioEvent, Config, DEFAULT_PACTL, Daemon, MicNodeSelection, SupervisedPwRecord,
+    resolve_mic_node, run_aec_probe,
 };
 
 /// Lifecycle channel capacity — capture.start/end/error events for a
@@ -21,13 +22,33 @@ const LIFECYCLE_CAPACITY: usize = 32;
 async fn main() -> std::process::ExitCode {
     let _ = init_tracing();
 
-    let config = match Config::from_env() {
+    let mut config = match Config::from_env() {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "wm-audio config failed");
             return std::process::ExitCode::from(1);
         }
     };
+
+    // AEC probe (PRD-aec §2.4). When the `aec` cargo feature is on
+    // and the `wm-mic-aec` virtual source is live, substitute it for
+    // the configured WM_MIC_NODE so the rest of the resolution chain
+    // (existing AC9 fallback) operates on the AEC node. When the
+    // probe is Missing, log once and let the configured node win as
+    // before — wm-audio degrades to half-duplex, the daemon stays up.
+    let pactl_bin = std::env::var("WM_PACTL_BIN")
+        .unwrap_or_else(|_| DEFAULT_PACTL.to_owned());
+    let aec_probe = run_aec_probe(&pactl_bin).await;
+    log_aec_probe(&aec_probe);
+    let effective_mic_node = aec_probe.resolve_mic_node(&config.mic_node).to_owned();
+    if effective_mic_node != config.mic_node {
+        tracing::info!(
+            from = %config.mic_node,
+            to = %effective_mic_node,
+            "AEC probe substituted mic node",
+        );
+        config.mic_node = effective_mic_node;
+    }
 
     // Resolve the mic node against the live source list. AC9: fall
     // back to PipeWire default if the configured node is missing
@@ -125,6 +146,23 @@ fn build_supervisor(
         life_tx,
         supervisor_shutdown,
     )
+}
+
+fn log_aec_probe(probe: &AecProbe) {
+    match probe {
+        AecProbe::FeatureDisabled => {
+            tracing::debug!("aec feature compiled out; skipping AEC probe");
+        }
+        AecProbe::Present { node } => {
+            tracing::info!(node = %node, "aec source present");
+        }
+        AecProbe::Missing { expected } => {
+            tracing::warn!(
+                expected = %expected,
+                "aec_module_missing: install pkg/pipewire-config/99-wintermute-aec.conf and restart pipewire, or set --no-default-features",
+            );
+        }
+    }
 }
 
 fn log_selection(sel: &MicNodeSelection) {

@@ -1,6 +1,6 @@
 [package]
 name = "wintermute-audio"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -65,7 +65,7 @@ name = "wm-audio-dump"
 path = "src/bin/wm-audio-dump.rs"
 
 [dependencies]
-agorabus = { path = "../agorabus" }
+agorabus = { path = "/home/jsy/wintermute/agorabus" }
 anyhow = "1"
 base64 = "0.22"
 ringbuf = "0.4"
@@ -79,3 +79,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 [dev-dependencies]
 proptest = "1"
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "test-util", "process", "fs", "io-util", "net"] }
+
+[features]
+# `aec` (default-on) gates the PipeWire echo-cancel integration. With
+# the feature enabled, install.sh drops
+# `pkg/pipewire-config/99-wintermute-aec.conf` into the system PipeWire
+# config dir, and the daemon probes the `wm-mic-aec` virtual source on
+# startup (logging `aec_module_missing` if it's not present and
+# falling back to the configured / default mic node). PRD-wintermute-audio-aec.
+default = ["aec"]
+aec = []
+# `pipewire-only` is the explicit opt-out used by the AEC vs. no-AEC
+# comparison in AC5 of PRD-wintermute-audio-aec. It is a marker — no
+# code currently keys off it — so that `--no-default-features
+# --features pipewire-only` is a meaningful invocation.
+pipewire-only = []

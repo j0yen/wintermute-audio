@@ -52,9 +52,63 @@ if ! command -v wm-audio >/dev/null 2>&1; then
   echo "    export PATH=\"\$HOME/.cargo/bin:\$PATH\""
 fi
 
+# AEC config drop (PRD-wintermute-audio-aec §2.1).
+#
+# Default-on; opt out by setting WM_AUDIO_INSTALL_AEC=0 or by building
+# with `cargo install --path . --no-default-features --features pipewire-only`
+# (then setting WM_AUDIO_INSTALL_AEC=0 here too, since this script
+# can't introspect the cargo features that were applied above).
+#
+# We try the system-wide path first because PipeWire's system service
+# reads /etc/pipewire/pipewire.conf.d/ on session start; if /etc is
+# not writable (no sudo) we fall back to the user dir.
+if [ "${WM_AUDIO_INSTALL_AEC:-1}" = "1" ]; then
+  AEC_CONF_SRC="$SCRIPT_DIR/pkg/pipewire-config/99-wintermute-aec.conf"
+  if [ ! -f "$AEC_CONF_SRC" ]; then
+    echo "! AEC config $AEC_CONF_SRC missing in checkout; skipping AEC install."
+  else
+    SYS_DIR="/etc/pipewire/pipewire.conf.d"
+    USER_DIR="$HOME/.config/pipewire/pipewire.conf.d"
+    INSTALLED=""
+    if [ -w "$SYS_DIR" ] 2>/dev/null; then
+      install -m 644 "$AEC_CONF_SRC" "$SYS_DIR/99-wintermute-aec.conf"
+      INSTALLED="$SYS_DIR/99-wintermute-aec.conf"
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+      sudo mkdir -p "$SYS_DIR"
+      sudo install -m 644 "$AEC_CONF_SRC" "$SYS_DIR/99-wintermute-aec.conf"
+      INSTALLED="$SYS_DIR/99-wintermute-aec.conf"
+    fi
+    if [ -z "$INSTALLED" ]; then
+      mkdir -p "$USER_DIR"
+      install -m 644 "$AEC_CONF_SRC" "$USER_DIR/99-wintermute-aec.conf"
+      INSTALLED="$USER_DIR/99-wintermute-aec.conf"
+    fi
+    echo "✓ AEC config: $INSTALLED"
+
+    # Reload the user PipeWire service so the new module loads. Best-
+    # effort: skip silently if systemctl --user is unavailable.
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user --version >/dev/null 2>&1; then
+      systemctl --user restart pipewire pipewire-pulse 2>/dev/null || true
+      echo "  pipewire user service restarted"
+    fi
+  fi
+else
+  echo "↷ WM_AUDIO_INSTALL_AEC=0; skipping AEC config drop."
+fi
+
+# Mirror ~/.cargo/bin/wm-audio into ~/.local/bin/ so the binary is on
+# the bootstrap-provided PATH even when ~/.cargo/bin is not.
+if [ -x "$HOME/.cargo/bin/wm-audio" ]; then
+  mkdir -p "$HOME/.local/bin"
+  install -m 755 "$HOME/.cargo/bin/wm-audio" "$HOME/.local/bin/wm-audio"
+  echo "✓ wm-audio mirrored to $HOME/.local/bin/wm-audio"
+fi
+
 echo "✓ wm-audio installed."
 echo
 echo "Next:"
-echo "  # drop PipeWire AEC config + ONNX models, then:"
+echo "  # verify AEC source loaded:"
+echo "  pactl list short sources | grep wm-mic-aec"
+echo "  # then start the daemon (will probe wm-mic-aec at startup):"
 echo "  wm-audio start                       # uses bootstrap env"
 echo "  WM_WAKE_WORD=hey_jarvis wm-audio start"

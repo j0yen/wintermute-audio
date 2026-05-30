@@ -5,6 +5,53 @@ loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (loose interpretation while pre-1.0).
 
+## [0.2.1] - 2026-05-28
+
+Acoustic echo cancellation lands as a PipeWire drop-in plus a tiny Rust
+probe (PRD-wintermute-audio-aec). Once installed, the laptop's own TTS
+playback is subtracted from the mic signal so the wake-word detector
+stops re-triggering on the daemon's own voice — the precondition for
+the inference + barge-in PRDs that follow.
+
+### Added
+
+- `pkg/pipewire-config/99-wintermute-aec.conf` — a `module-echo-cancel`
+  drop-in that creates two virtual nodes:
+  - `wm-mic-aec`: AEC-cancelled microphone source (set
+    `WM_MIC_NODE=wm-mic-aec` to consume it).
+  - `wm-spk-aec`: AEC playback reference sink.
+  WebRTC AEC under the hood, with gain-control + noise-suppression +
+  extended-filter enabled.
+- `install.sh` now drops the AEC config into
+  `/etc/pipewire/pipewire.conf.d/` (or
+  `~/.config/pipewire/pipewire.conf.d/` when /etc isn't writable) and
+  restarts the user `pipewire` service. Opt out with
+  `WM_AUDIO_INSTALL_AEC=0` or build with
+  `--no-default-features --features pipewire-only`.
+- `install.sh` mirrors `~/.cargo/bin/wm-audio` into `~/.local/bin/` so
+  the binary lives on the bootstrap PATH.
+- `source::AecProbe` + `source::run_aec_probe` — startup probe that
+  shells out to `pactl list short sources` (overridable via
+  `WM_PACTL_BIN`) and checks for the `wm-mic-aec` node. When present,
+  the daemon substitutes `wm-mic-aec` for the configured
+  `WM_MIC_NODE`; when missing, logs `aec_module_missing` and falls
+  back to the existing AC9 mic-node-fallback chain so wm-audio stays
+  up half-duplex.
+- `aec` Cargo feature (default-on). When off, the probe is compiled
+  out and the AEC fallback path is unreachable — the existing
+  pipewire-only behaviour is preserved verbatim for AEC vs no-AEC
+  A/B comparisons. `pipewire-only` is the matching opt-out marker
+  feature.
+
+### Changed
+
+- `main.rs` runs the AEC probe before resolving the mic node, so the
+  AC9 fallback chain operates on the effective (AEC-substituted)
+  value rather than the raw `WM_MIC_NODE` env var.
+- `lib.rs` re-exports `AecProbe`, `AEC_SOURCE_NODE`, `DEFAULT_PACTL`,
+  `aec_feature_on`, `parse_pactl_short_sources`,
+  `probe_pactl_sources`, and `run_aec_probe`.
+
 ## [0.2.0] - 2026-05-28
 
 Mirror of `wintermute-tts` v0.2.0 (PipeWire output): the daemon now

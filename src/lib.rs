@@ -46,9 +46,10 @@ pub use events::{
     is_self_emitted_topic,
 };
 pub use source::{
-    MicNodeSelection, MicSource, NullSource, PW_RECORD_FRAME_SAMPLES, PcmFrame,
-    PwRecordSource, SourceMeta, SupervisedPwRecord, backoff_ms_for_attempt, pw_record_args,
-    resolve_mic_node,
+    AEC_SOURCE_NODE, AecProbe, DEFAULT_PACTL, MicNodeSelection, MicSource, NullSource,
+    PW_RECORD_FRAME_SAMPLES, PcmFrame, PwRecordSource, SourceMeta, SupervisedPwRecord,
+    aec_feature_on, backoff_ms_for_attempt, parse_pactl_short_sources, probe_pactl_sources,
+    pw_record_args, resolve_mic_node, run_aec_probe,
 };
 pub use state::{MuteReason, MuteState, Shutdown};
 pub use vad::{

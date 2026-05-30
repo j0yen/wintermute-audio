@@ -180,6 +180,186 @@ impl MicNodeSelection {
     }
 }
 
+/// Default node name for the AEC-cancelled virtual source.
+///
+/// Matches `source.props.node.name` in
+/// `pkg/pipewire-config/99-wintermute-aec.conf`. The daemon probes for
+/// this name on startup when the `aec` cargo feature is enabled.
+pub const AEC_SOURCE_NODE: &str = "wm-mic-aec";
+
+/// Default binary used to enumerate live `PipeWire` sources.
+///
+/// Overridable via `WM_PACTL_BIN` so tests / packaging can substitute
+/// (and so the probe never hard-codes a `/usr/bin/pactl` path that
+/// some distros don't ship). Defaults to `"pactl"` (resolved on
+/// `$PATH`).
+pub const DEFAULT_PACTL: &str = "pactl";
+
+/// Parse the output of `pactl list short sources` into the set of node names.
+///
+/// One line per source; the second tab-separated column is the node name.
+/// Pure function so the probe is testable without a running `PipeWire` graph.
+///
+/// Lines we cannot parse are skipped silently — `pactl` output drift
+/// is an upstream concern, not a `wm-audio` failure mode.
+#[must_use]
+pub fn parse_pactl_short_sources(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        // Layout:  <index>\t<name>\t<module>\t<format>\t<state>
+        // We want column 1 (zero-indexed).
+        let mut cols = line.split('\t');
+        let _idx = cols.next();
+        if let Some(name) = cols.next() {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                out.push(trimmed.to_owned());
+            }
+        }
+    }
+    out
+}
+
+/// Spawn `pactl list short sources` and return the parsed names.
+///
+/// Surfaces the empty list when the binary is missing or exits
+/// non-zero — the daemon treats "could not enumerate" the same way as
+/// "AEC source absent", logs the soft fault, and falls back to the
+/// configured mic node. PRD-aec §2.4.
+///
+/// # Errors
+///
+/// Returns [`AudioError::Capture`] only if spawning fails in a way
+/// callers might want to distinguish from "no AEC source"; in practice
+/// the daemon's startup path collapses any error into the
+/// `aec_module_missing` fallback branch.
+pub async fn probe_pactl_sources(pactl_bin: &str) -> Result<Vec<String>, AudioError> {
+    let mut cmd = Command::new(pactl_bin);
+    cmd.args(["list", "short", "sources"]);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let output = match cmd.output().await {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AudioError::Capture(format!(
+                "pactl_missing: {pactl_bin} not on $PATH"
+            )));
+        }
+        Err(e) => {
+            return Err(AudioError::Capture(format!("spawn {pactl_bin}: {e}")));
+        }
+    };
+    if !output.status.success() {
+        return Err(AudioError::Capture(format!(
+            "{pactl_bin} list short sources exited {status}",
+            status = output.status
+        )));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_pactl_short_sources(&text))
+}
+
+/// Outcome of the AEC startup probe.
+///
+/// The daemon uses [`AecProbe::resolve_mic_node`] to pick the effective
+/// `WM_MIC_NODE` value: if the AEC source is present, `wm-mic-aec`
+/// takes precedence; otherwise the originally-configured node (which
+/// may itself be empty / `PipeWire` default) is preserved unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AecProbe {
+    /// `aec` Cargo feature is compiled out — probe was skipped, no
+    /// substitution occurs. PRD-aec §2.3 opt-out.
+    FeatureDisabled,
+    /// AEC source is live; the daemon will substitute the AEC node for
+    /// the configured `WM_MIC_NODE`.
+    Present {
+        /// Node name that satisfied the probe (always
+        /// [`AEC_SOURCE_NODE`] today, kept as a field for forward
+        /// compat).
+        node: String,
+    },
+    /// AEC source is absent from the live source list. The daemon logs
+    /// `aec_module_missing` and falls back to whatever the user (or
+    /// bootstrap) already configured. PRD-aec §2.4.
+    Missing {
+        /// What the probe was looking for, so the warning is
+        /// actionable ("install pkg/pipewire-config/99-wintermute-aec.conf
+        /// and restart `PipeWire`").
+        expected: String,
+    },
+}
+
+impl AecProbe {
+    /// Build the probe result from `aec` feature + live source list.
+    ///
+    /// Pure function so tests can pin every branch without spawning
+    /// `pactl`. The runtime entry point is
+    /// [`run_aec_probe`].
+    #[must_use]
+    pub fn classify(aec_feature_on: bool, sources: &[String]) -> Self {
+        if !aec_feature_on {
+            return Self::FeatureDisabled;
+        }
+        let needle = AEC_SOURCE_NODE;
+        if sources.iter().any(|s| s == needle) {
+            Self::Present {
+                node: needle.to_owned(),
+            }
+        } else {
+            Self::Missing {
+                expected: needle.to_owned(),
+            }
+        }
+    }
+
+    /// Apply the probe outcome to the configured `WM_MIC_NODE` value.
+    ///
+    /// PRD-aec §2.2 + §2.4: when AEC is present, the AEC node wins;
+    /// when AEC is absent or compiled out, the configured node is
+    /// preserved verbatim so the existing
+    /// [`resolve_mic_node`] fallback chain still runs.
+    #[must_use]
+    pub const fn resolve_mic_node<'a>(&'a self, configured: &'a str) -> &'a str {
+        match self {
+            Self::Present { node } => node.as_str(),
+            Self::FeatureDisabled | Self::Missing { .. } => configured,
+        }
+    }
+}
+
+/// Whether the `aec` Cargo feature is on for the current build.
+///
+/// Pure constant so the probe wiring stays testable. When the feature
+/// is off the daemon never spawns `pactl` and the AEC fallback path is
+/// unreachable. PRD-aec §2.3.
+#[must_use]
+pub const fn aec_feature_on() -> bool {
+    cfg!(feature = "aec")
+}
+
+/// Run the AEC probe end-to-end: enumerate sources via `pactl`,
+/// classify the outcome, and return the [`AecProbe`].
+///
+/// Treats every error as `Missing` — the daemon logs once and falls
+/// back to the configured mic node. PRD-aec §2.4 keeps "AEC absent"
+/// soft so a missing `PipeWire` module never blocks `wm-audio` startup.
+pub async fn run_aec_probe(pactl_bin: &str) -> AecProbe {
+    if !aec_feature_on() {
+        return AecProbe::FeatureDisabled;
+    }
+    match probe_pactl_sources(pactl_bin).await {
+        Ok(sources) => AecProbe::classify(true, &sources),
+        Err(e) => {
+            warn!(error = %e, "AEC probe failed; treating as missing");
+            AecProbe::Missing {
+                expected: AEC_SOURCE_NODE.to_owned(),
+            }
+        }
+    }
+}
+
 /// Resolve `mic_node` against the live list of input nodes.
 ///
 /// `available_sources` is the set of node names that `pactl list short
@@ -693,6 +873,109 @@ mod tests {
                 );
             }
             other => panic!("expected Capture(pw_record_missing), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_pactl_short_sources_extracts_column_one() {
+        // Real-shape pactl output: tab-separated columns,
+        // <index>\t<name>\t<module>\t<format>\t<state>.
+        let sample = "\
+44\talsa_input.pci-0000.HiFi__Mic1__source\tPipeWire\ts24-32le 2ch 48000Hz\tSUSPENDED
+45\twm-mic-aec\tPipeWire\ts16le 1ch 16000Hz\tRUNNING
+46\twm-aec-capture\tPipeWire\ts16le 1ch 16000Hz\tIDLE
+";
+        let names = parse_pactl_short_sources(sample);
+        assert_eq!(names.len(), 3);
+        assert!(names.iter().any(|s| s == "wm-mic-aec"));
+        assert!(
+            names
+                .iter()
+                .any(|s| s == "alsa_input.pci-0000.HiFi__Mic1__source")
+        );
+    }
+
+    #[test]
+    fn parse_pactl_short_sources_skips_blank_and_malformed() {
+        let sample = "\n\t\n42\twm-mic-aec\tPipeWire\t-\t-\n\n";
+        let names = parse_pactl_short_sources(sample);
+        // Two well-formed lines remain: blank → skipped; \t\n → idx
+        // present but name empty after trim, so it survives only if
+        // the second column was non-empty.
+        assert!(names.contains(&"wm-mic-aec".to_owned()));
+    }
+
+    #[test]
+    fn aec_probe_feature_disabled_short_circuits() {
+        // The "feature off" branch must never substitute, even if the
+        // AEC source is somehow present in the list.
+        let probe = AecProbe::classify(false, &["wm-mic-aec".into()]);
+        assert_eq!(probe, AecProbe::FeatureDisabled);
+        assert_eq!(probe.resolve_mic_node("user-mic"), "user-mic");
+        assert_eq!(probe.resolve_mic_node(""), "");
+    }
+
+    #[test]
+    fn aec_probe_present_substitutes_configured_node() {
+        // PRD §2.4: when AEC source is live and feature is on, the
+        // resolved node is wm-mic-aec regardless of what the user
+        // configured.
+        let probe = AecProbe::classify(
+            true,
+            &[
+                "alsa_input.pci-0000.HiFi__Mic1__source".into(),
+                "wm-mic-aec".into(),
+            ],
+        );
+        match &probe {
+            AecProbe::Present { node } => assert_eq!(node, "wm-mic-aec"),
+            other => panic!("expected Present, got {other:?}"),
+        }
+        assert_eq!(probe.resolve_mic_node("anything"), "wm-mic-aec");
+        assert_eq!(probe.resolve_mic_node(""), "wm-mic-aec");
+    }
+
+    #[test]
+    fn aec_probe_missing_preserves_configured_node() {
+        // PRD §2.4 fallback: AEC source absent → configured value
+        // wins (whatever the operator picked, including the empty
+        // "use PipeWire default" sentinel).
+        let probe = AecProbe::classify(
+            true,
+            &["alsa_input.pci-0000.HiFi__Mic1__source".into()],
+        );
+        match &probe {
+            AecProbe::Missing { expected } => assert_eq!(expected, "wm-mic-aec"),
+            other => panic!("expected Missing, got {other:?}"),
+        }
+        assert_eq!(probe.resolve_mic_node("user-mic"), "user-mic");
+        assert_eq!(probe.resolve_mic_node(""), "");
+    }
+
+    #[test]
+    fn aec_feature_on_matches_cfg() {
+        // Mirror the cfg!() lookup so the test value tracks the build
+        // configuration without ifdef-ing the assertion itself.
+        let expected = cfg!(feature = "aec");
+        assert_eq!(aec_feature_on(), expected);
+    }
+
+    #[tokio::test]
+    async fn run_aec_probe_falls_back_to_missing_when_pactl_absent() {
+        // Spawning a non-existent binary must downgrade to Missing
+        // when the feature is on (so daemon startup still proceeds);
+        // when the feature is off, FeatureDisabled is the answer
+        // regardless of pactl presence.
+        let probe = run_aec_probe("/definitely/not/pactl-xyz").await;
+        if aec_feature_on() {
+            match &probe {
+                AecProbe::Missing { expected } => {
+                    assert_eq!(expected, "wm-mic-aec");
+                }
+                other => panic!("expected Missing on pactl-absent, got {other:?}"),
+            }
+        } else {
+            assert_eq!(probe, AecProbe::FeatureDisabled);
         }
     }
 
