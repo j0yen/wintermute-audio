@@ -80,6 +80,8 @@ async fn run_speech_lifecycle() -> Result<(), String> {
         socket_path: bus_sock.clone(),
         heartbeat_timeout: Duration::from_secs(60),
         broadcast_capacity: 1024,
+        drain_grace_ms: agorabus::DEFAULT_DRAIN_GRACE_MS,
+        drain_resume_hint_ms: agorabus::DEFAULT_DRAIN_RESUME_HINT_MS,
     };
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let (bus_shutdown_tx, bus_shutdown_rx) = tokio::sync::oneshot::channel::<()>();

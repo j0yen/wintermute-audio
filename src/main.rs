@@ -30,15 +30,19 @@ const LIFECYCLE_CAPACITY: usize = 32;
 // Subcommand dispatch
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::print_stderr)]
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
     // Determine subcommand.  With no args or "start", run the daemon.
-    let subcmd = args.get(1).map(String::as_str).unwrap_or("start");
+    let subcmd = args.get(1).map_or("start", String::as_str);
 
     match subcmd {
         "start" | "--start" => run_daemon(),
-        "fetch-models" => run_fetch_models(&args[1..]),
+        "fetch-models" => {
+            let subcmd_args = args.get(1..).unwrap_or(&[]);
+            run_fetch_models(subcmd_args)
+        }
         "-h" | "--help" => {
             print_help();
             std::process::ExitCode::SUCCESS
@@ -83,26 +87,40 @@ fn print_help() {
 // `fetch-models` subcommand
 // ---------------------------------------------------------------------------
 
-/// Parse and run the `fetch-models` subcommand.
+/// Flags parsed from `fetch-models` arguments.
+struct FetchFlags {
+    prefix: PathBuf,
+    force: bool,
+    list_only: bool,
+    format: OutputFormat,
+}
+
+/// Parse flags for the `fetch-models` subcommand.
 ///
-/// `subcmd_args` is `&args[1..]` (i.e. includes "fetch-models" as [0]).
-fn run_fetch_models(subcmd_args: &[String]) -> std::process::ExitCode {
-    // --- parse flags -------------------------------------------------------
+/// Returns `Ok(FetchFlags)` or an error message suitable for `eprintln!`.
+///
+/// # Errors
+///
+/// Returns an error string on unrecognized flags or missing values.
+#[allow(clippy::print_stderr)]
+fn parse_fetch_flags(subcmd_args: &[String]) -> Result<Option<FetchFlags>, std::process::ExitCode> {
     let mut prefix = PathBuf::from(DEFAULT_MODEL_PREFIX);
     let mut force = false;
     let mut list_only = false;
     let mut format = OutputFormat::Text;
 
-    let mut i = 1; // skip "fetch-models"
+    let mut i = 1usize; // skip "fetch-models" at index 0
     while i < subcmd_args.len() {
-        match subcmd_args[i].as_str() {
+        let flag = subcmd_args.get(i).map_or("", String::as_str);
+        match flag {
             "--prefix" => {
                 i += 1;
-                if i >= subcmd_args.len() {
+                if let Some(v) = subcmd_args.get(i) {
+                    prefix = PathBuf::from(v);
+                } else {
                     eprintln!("wm-audio fetch-models: --prefix requires a value");
-                    return std::process::ExitCode::from(1);
+                    return Err(std::process::ExitCode::from(1));
                 }
-                prefix = PathBuf::from(&subcmd_args[i]);
             }
             "--force" => {
                 force = true;
@@ -112,36 +130,57 @@ fn run_fetch_models(subcmd_args: &[String]) -> std::process::ExitCode {
             }
             "--format" => {
                 i += 1;
-                if i >= subcmd_args.len() {
-                    eprintln!("wm-audio fetch-models: --format requires a value");
-                    return std::process::ExitCode::from(1);
-                }
-                match OutputFormat::parse(&subcmd_args[i]) {
-                    Ok(f) => format = f,
-                    Err(e) => {
-                        eprintln!("wm-audio fetch-models: {e}");
-                        return std::process::ExitCode::from(1);
+                if let Some(v) = subcmd_args.get(i) {
+                    match OutputFormat::parse(v) {
+                        Ok(f) => format = f,
+                        Err(e) => {
+                            eprintln!("wm-audio fetch-models: {e}");
+                            return Err(std::process::ExitCode::from(1));
+                        }
                     }
+                } else {
+                    eprintln!("wm-audio fetch-models: --format requires a value");
+                    return Err(std::process::ExitCode::from(1));
                 }
             }
             "-h" | "--help" => {
                 print_help();
-                return std::process::ExitCode::SUCCESS;
+                return Ok(None);
             }
             unknown => {
                 eprintln!("wm-audio fetch-models: unknown flag {unknown:?}");
-                return std::process::ExitCode::from(1);
+                return Err(std::process::ExitCode::from(1));
             }
         }
         i += 1;
     }
 
+    Ok(Some(FetchFlags { prefix, force, list_only, format }))
+}
+
+/// Parse and run the `fetch-models` subcommand.
+///
+/// `subcmd_args` is `&args[1..]` (i.e. includes "fetch-models" as [0]).
+#[allow(clippy::print_stderr)]
+fn run_fetch_models(subcmd_args: &[String]) -> std::process::ExitCode {
+    let flags = match parse_fetch_flags(subcmd_args) {
+        Ok(Some(f)) => f,
+        Ok(None) => return std::process::ExitCode::SUCCESS,
+        Err(code) => return code,
+    };
+
     // --- --list path -------------------------------------------------------
-    if list_only {
-        return do_list(&prefix, format);
+    if flags.list_only {
+        return do_list(&flags.prefix, flags.format);
     }
 
     // --- provision all models ----------------------------------------------
+    do_provision(&flags.prefix, flags.force)
+}
+
+/// Provision all models into `prefix`.
+#[allow(clippy::print_stderr)]
+fn do_provision(prefix: &std::path::Path, force: bool) -> std::process::ExitCode {
     let tmp_dir = std::env::temp_dir().join(format!(
         "wm-audio-fetch-{}", std::process::id()
     ));
@@ -150,7 +189,7 @@ fn run_fetch_models(subcmd_args: &[String]) -> std::process::ExitCode {
         return std::process::ExitCode::from(1);
     }
 
-    let mut provenance = match read_provenance(&prefix) {
+    let mut provenance = match read_provenance(prefix) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("wm-audio fetch-models: cannot read existing provenance: {e}");
@@ -158,11 +197,11 @@ fn run_fetch_models(subcmd_args: &[String]) -> std::process::ExitCode {
         }
     };
 
-    let mut needs_privilege: Vec<(String, PathBuf, PathBuf)> = Vec::new();
+    let mut needs_privilege = false;
     let mut had_error = false;
 
     for entry in MANIFEST {
-        let outcome = provision_one(entry, &prefix, &tmp_dir, force);
+        let outcome = provision_one(entry, prefix, &tmp_dir, force);
         match outcome {
             Ok(InstallOutcome::AlreadyCurrent) => {
                 eprintln!("fetch-models: {} already-current (skipped)", entry.name);
@@ -173,12 +212,12 @@ fn run_fetch_models(subcmd_args: &[String]) -> std::process::ExitCode {
                 // verified it in provision_one via download_to_tmp).
                 upsert_provenance(&mut provenance, entry, entry.sha256);
             }
-            Ok(InstallOutcome::NeedsPrivilege { staged, target }) => {
+            Ok(InstallOutcome::NeedsPrivilege { staged: _, target: _ }) => {
                 eprintln!(
                     "fetch-models: {} staged+verified but target not writable; needs privilege",
                     entry.name
                 );
-                needs_privilege.push((entry.name.to_owned(), staged, target));
+                needs_privilege = true;
             }
             Err(e) => {
                 eprintln!("fetch-models: ERROR for {}: {e}", entry.name);
@@ -189,7 +228,7 @@ fn run_fetch_models(subcmd_args: &[String]) -> std::process::ExitCode {
 
     // Write provenance for whatever was successfully installed.
     if !provenance.is_empty() {
-        if let Err(e) = write_provenance(&prefix, &provenance) {
+        if let Err(e) = write_provenance(prefix, &provenance) {
             eprintln!("fetch-models: could not write MODELS.json: {e}");
         }
     }
@@ -198,9 +237,10 @@ fn run_fetch_models(subcmd_args: &[String]) -> std::process::ExitCode {
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
     // Exit 2 when any model needs privilege.
-    if !needs_privilege.is_empty() {
+    if needs_privilege {
         eprintln!(
-            "\nfetch-models: some models could not be installed to {prefix:?} (not writable).",
+            "\nfetch-models: some models could not be installed to {} (not writable).",
+            prefix.display()
         );
         eprintln!("Re-run with privilege:");
         eprintln!("  sudo wm-audio fetch-models --prefix {}", prefix.display());
@@ -217,13 +257,13 @@ fn run_fetch_models(subcmd_args: &[String]) -> std::process::ExitCode {
 }
 
 /// Print the model list (--list flag).
-#[allow(clippy::print_stdout)]
-fn do_list(prefix: &PathBuf, format: OutputFormat) -> std::process::ExitCode {
+#[allow(clippy::print_stdout, clippy::print_stderr)]
+fn do_list(prefix: &std::path::Path, format: OutputFormat) -> std::process::ExitCode {
     let list = build_list(prefix);
     match format {
         OutputFormat::Text => {
             println!("wm-audio model manifest (prefix: {})", prefix.display());
-            println!("{:<14} {:<5} {:<25} {}", "NAME", "KIND", "FILENAME", "LICENSE");
+            println!("{:<14} {:<5} {:<25} LICENSE", "NAME", "KIND", "FILENAME");
             for e in &list {
                 println!(
                     "{:<14} {:<5} {:<25} {}",
@@ -251,6 +291,7 @@ fn do_list(prefix: &PathBuf, format: OutputFormat) -> std::process::ExitCode {
 // Daemon subcommand (`start`)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::print_stderr)]
 fn run_daemon() -> std::process::ExitCode {
     // Build a single-threaded tokio runtime for the daemon.
     let rt = match tokio::runtime::Builder::new_multi_thread()
