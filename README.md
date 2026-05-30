@@ -113,6 +113,26 @@ wm-audio start                         # uses bootstrap env
 WM_WAKE_WORD=hey_jarvis wm-audio start # explicit wake word
 ```
 
+## Hardware reality verification
+
+ACs 1, 2, 5, 8 are acoustic/OS-bound (live AEC against real speaker
+playback, ≥10 dB noise reduction measured on real mic input, real-recording
+false-accept rate, recovery from a live PipeWire restart). They are declared
+in the PRD's `deferred_acs:` + `mock_unjustified_for:` frontmatter with a
+one-sentence justification each, because an in-process fake would assert the
+math we wrote rather than the hardware's real acoustic behavior.
+
+To validate them against real audio hardware, run:
+
+```sh
+cargo test --features=real-hardware
+```
+
+This feature is opt-in and off by default, so `cargo test` stays green on
+hosts without a microphone or PipeWire graph. The drift-report sweep that
+compares mock vs. real-hardware outcomes (`hardware-drift.json`) is
+scaffolded as a follow-on PRD and is not invoked by default.
+
 ## License
 
 Dual-licensed under MIT or Apache-2.0 at your option.

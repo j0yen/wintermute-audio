@@ -195,10 +195,12 @@ pub const AEC_SOURCE_NODE: &str = "wm-mic-aec";
 /// `$PATH`).
 pub const DEFAULT_PACTL: &str = "pactl";
 
-/// Parse the output of `pactl list short sources` into the set of node names.
+/// Parse the output of `pactl list short sources` into the set of
+/// node names.
 ///
-/// One line per source; the second tab-separated column is the node name.
-/// Pure function so the probe is testable without a running `PipeWire` graph.
+/// One line per source; the second tab-separated column is
+/// the node name. Pure function so the probe is testable without a
+/// running `PipeWire` graph.
 ///
 /// Lines we cannot parse are skipped silently — `pactl` output drift
 /// is an upstream concern, not a `wm-audio` failure mode.

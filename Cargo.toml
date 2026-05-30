@@ -65,7 +65,7 @@ name = "wm-audio-dump"
 path = "src/bin/wm-audio-dump.rs"
 
 [dependencies]
-agorabus = { path = "/home/jsy/wintermute/agorabus" }
+agorabus = { path = "../agorabus" }
 anyhow = "1"
 base64 = "0.22"
 ringbuf = "0.4"
@@ -94,3 +94,8 @@ aec = []
 # code currently keys off it — so that `--no-default-features
 # --features pipewire-only` is a meaningful invocation.
 pipewire-only = []
+# Opt-in gate for hardware-bound acceptance tests (see README "Hardware
+# reality verification"). Off by default so `cargo test` stays green on
+# hosts without a microphone or PipeWire graph. Per
+# PRD-autobuilder-hardware-mock-convention AC10.
+real-hardware = []

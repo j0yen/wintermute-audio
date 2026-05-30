@@ -1,4 +1,0 @@
-# Redirect path deps that would resolve into a non-existent sibling
-# worktree directory to the canonical repo location.
-[net]
-offline = false
