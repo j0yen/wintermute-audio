@@ -16,6 +16,14 @@ This is the **audio** component of Fleet 1 of the wintermute vision.
 
 ## Recent
 
+- **v0.3.0 (2026-05-30)** — `wm-audio fetch-models` subcommand ships.
+  Downloads, sha256-verifies, and installs the four pretrained ONNX
+  models (3 microWakeWord wake-word + 1 Silero VAD) into
+  `/usr/share/wintermute/models/{wake,vad}/`. Idempotent; writes provenance
+  sidecar `MODELS.json`; exits 2 with a clear `sudo` hint when the default
+  prefix is root-owned. `--prefix <dir>` allows unprivileged test installs.
+  Unblocks `audio-inference`. See PRD-rouse-wake-vad-models.
+
 - **v0.2.0 (2026-05-28)** — live PipeWire capture ships. The daemon
   now spawns `pw-record` as the default mic source, streams 16 kHz
   mono i16 frames into the UDS fanout, and emits a
