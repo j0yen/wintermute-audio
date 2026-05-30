@@ -177,6 +177,7 @@ impl<S: MicSource> Daemon<S> {
             session = %config.session_id,
             mic = %config.mic_node,
             wake = %config.wake_word.as_label(),
+            speech_end_silence_ms = config.speech_end_silence_ms,
             "wm-audio starting",
         );
 
@@ -268,7 +269,11 @@ impl<S: MicSource> Daemon<S> {
         let mut wake_window = MelWindowBuffer::with_defaults();
         let mut wake_was_active = mute.should_run_wake();
         let mut vad_window = VadWindow::with_defaults();
-        let mut vad_tracker = VadEdgeTracker::with_defaults();
+        let mut vad_tracker = VadEdgeTracker::new(
+            0.5,
+            crate::vad::VAD_FRAME_MS,
+            config.speech_end_silence_ms,
+        );
         let mut chunk_seq: u64 = 0;
         loop {
             if shutdown.is_triggered() {
@@ -628,6 +633,7 @@ mod tests {
             bus_socket: std::path::PathBuf::from("/tmp/wm-audio-no-bus.sock"),
             session_id: "wm-audio-test".into(),
             pw_record_bin: crate::config::DEFAULT_PW_RECORD.to_owned(),
+            speech_end_silence_ms: crate::config::SPEECH_SILENCE_MS_DEFAULT,
         }
     }
 

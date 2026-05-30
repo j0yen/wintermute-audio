@@ -453,4 +453,113 @@ mod tests {
         );
         assert!(!t.in_speech());
     }
+
+    /// PRD earshot-vad-patience AC3: with the elder-friendly hangover (1 500 ms)
+    /// a speech→short-pause→speech sequence must NOT emit `speech.end` during
+    /// the pause, and exactly one `speech.end` fires only after sustained silence.
+    ///
+    /// Sequence:
+    ///   - 10 speech frames  (320 ms of speech)
+    ///   - 20 silence frames (640 ms pause — inside the 1 500 ms elder hangover)
+    ///   - 5 speech frames   (160 ms resumed speech; total speech_ms = 1 120 ms)
+    ///   - 50 silence frames (1 600 ms sustained silence ≥ 1 500 ms → End)
+    ///
+    /// Because NullVadDetector always returns Silence this test drives the
+    /// tracker directly with synthetic outcomes — it is a pure state-machine
+    /// test of the patience window, independent of inference.
+    #[test]
+    fn elder_hangover_tolerates_mid_sentence_pause() {
+        use crate::config::SPEECH_SILENCE_MS_DEFAULT;
+
+        let frame_ms = VAD_FRAME_MS; // 32 ms
+        let mut t = VadEdgeTracker::new(0.5, frame_ms, SPEECH_SILENCE_MS_DEFAULT);
+
+        // Phase 1: rising edge on first speech frame.
+        assert_eq!(
+            t.step(VadOutcome::Speech { probability: 0.9 }),
+            Some(SpeechEdge::Start),
+            "rising edge on first speech frame"
+        );
+        assert!(t.in_speech());
+
+        // Phase 1 continued: 9 more speech frames.
+        for i in 1..10 {
+            assert_eq!(
+                t.step(VadOutcome::Speech { probability: 0.9 }),
+                None,
+                "speech frame {i}: no edge expected"
+            );
+        }
+
+        // Phase 2: mid-sentence pause — 20 silence frames (640 ms).
+        // The elder hangover is 1 500 ms so no `speech.end` should fire.
+        for i in 0..20 {
+            assert_eq!(
+                t.step(VadOutcome::Silence),
+                None,
+                "pause silence frame {i}: no End expected with elder hangover"
+            );
+            assert!(
+                t.in_speech(),
+                "pause silence frame {i}: tracker must still be in_speech"
+            );
+        }
+
+        // Phase 3: speech resumes — 5 more frames.
+        for i in 0..5 {
+            assert_eq!(
+                t.step(VadOutcome::Speech { probability: 0.9 }),
+                None,
+                "resumed speech frame {i}: no edge expected"
+            );
+            assert!(t.in_speech());
+        }
+
+        // Phase 4: sustained silence — must need ≥ 1 500 ms silence before End.
+        // 46 frames × 32 ms = 1 472 ms < 1 500 ms → no End yet.
+        for i in 0..46 {
+            assert_eq!(
+                t.step(VadOutcome::Silence),
+                None,
+                "sustained silence frame {i}: hangover not yet expired"
+            );
+        }
+        // 47th frame → accumulated silence = 1 504 ms ≥ 1 500 ms → End fires.
+        let edge = t.step(VadOutcome::Silence);
+        assert!(
+            matches!(edge, Some(SpeechEdge::End { .. })),
+            "expected SpeechEdge::End after full hangover, got {edge:?}"
+        );
+        assert!(!t.in_speech(), "tracker must be Silent after End");
+    }
+
+    /// PRD earshot-vad-patience AC4: a hangover set below the floor is rejected
+    /// by config parsing (tested here via the constant relationship).
+    /// The floor constant must be strictly less than the ceiling, and the
+    /// elder default must sit between them.
+    #[test]
+    fn hangover_constants_satisfy_floor_ceiling_invariant() {
+        use crate::config::{
+            SPEECH_SILENCE_MS_CEILING, SPEECH_SILENCE_MS_DEFAULT, SPEECH_SILENCE_MS_FLOOR,
+        };
+        assert!(
+            SPEECH_SILENCE_MS_FLOOR < SPEECH_SILENCE_MS_DEFAULT,
+            "elder default must exceed the floor"
+        );
+        assert!(
+            SPEECH_SILENCE_MS_DEFAULT < SPEECH_SILENCE_MS_CEILING,
+            "elder default must be under the ceiling"
+        );
+        assert!(
+            SPEECH_SILENCE_MS_FLOOR < SPEECH_SILENCE_MS_CEILING,
+            "floor must be strictly less than ceiling"
+        );
+        // The elder default must exceed the former hardcoded hangover so it is
+        // genuinely more patient than the previous value.
+        assert!(
+            SPEECH_SILENCE_MS_DEFAULT > SPEECH_END_HANGOVER_MS,
+            "elder default ({SPEECH_SILENCE_MS_DEFAULT} ms) must exceed the \
+             old hardcoded hangover ({SPEECH_END_HANGOVER_MS} ms)"
+        );
+    }
 }

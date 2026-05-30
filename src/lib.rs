@@ -43,7 +43,10 @@ pub mod state;
 pub mod vad;
 pub mod wake;
 
-pub use config::{Config, DEFAULT_PW_RECORD};
+pub use config::{
+    Config, DEFAULT_PW_RECORD, SPEECH_SILENCE_MS_CEILING, SPEECH_SILENCE_MS_DEFAULT,
+    SPEECH_SILENCE_MS_FLOOR,
+};
 pub use daemon::{CapturedBytes, Daemon};
 pub use errors::AudioError;
 pub use events::{
