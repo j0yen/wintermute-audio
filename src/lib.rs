@@ -32,6 +32,7 @@ pub mod daemon;
 pub mod errors;
 pub mod events;
 pub mod fanout;
+pub mod models;
 pub mod source;
 pub mod state;
 pub mod vad;
@@ -50,6 +51,11 @@ pub use source::{
     PW_RECORD_FRAME_SAMPLES, PcmFrame, PwRecordSource, SourceMeta, SupervisedPwRecord,
     aec_feature_on, backoff_ms_for_attempt, parse_pactl_short_sources, probe_pactl_sources,
     pw_record_args, resolve_mic_node, run_aec_probe,
+};
+pub use models::{
+    InstallOutcome, ListEntry, ModelEntry, ModelError, ModelKind, OutputFormat, ProvenanceRecord,
+    MANIFEST, build_list, dir_is_writable, is_current, provision_one, read_provenance,
+    sha256_hex, upsert_provenance, write_provenance,
 };
 pub use state::{MuteReason, MuteState, Shutdown};
 pub use vad::{

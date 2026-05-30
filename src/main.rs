@@ -1,25 +1,273 @@
 //! `wm-audio` — wintermute mic/wake/VAD daemon entry point.
 //!
-//! Spawns `pw-record` (or the binary in `WM_PW_RECORD_BIN`), reads
-//! 16 kHz mono i16 frames off stdout, and publishes them into the
-//! existing UDS fanout + agorabus event surface. The supervisor
-//! respawns `pw-record` on exit with 1 s / 2 s / 4 s / … / 30 s
-//! backoff so capture is a persistent service, not a one-shot.
+//! Subcommands:
+//! - `start` (default): Spawns `pw-record`, reads 16 kHz mono i16 frames
+//!   off stdout, and publishes them into the UDS fanout + agorabus event
+//!   surface. The supervisor respawns `pw-record` on exit with exponential
+//!   backoff so capture is a persistent service.
+//! - `fetch-models`: Downloads, checksum-verifies, and installs the four
+//!   pretrained ONNX models (3 microWakeWord + 1 Silero VAD) into the
+//!   model prefix. See PRD-rouse-wake-vad-models.md.
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use wintermute_audio::{
-    AecProbe, AudioEvent, Config, DEFAULT_PACTL, Daemon, MicNodeSelection, SupervisedPwRecord,
-    resolve_mic_node, run_aec_probe,
+    AecProbe, AudioEvent, Config, DEFAULT_PACTL, Daemon, InstallOutcome, MicNodeSelection,
+    OutputFormat, SupervisedPwRecord, MANIFEST, build_list, provision_one, read_provenance,
+    resolve_mic_node, run_aec_probe, upsert_provenance, write_provenance,
 };
+
+/// Default model prefix (system install, matches wm-stt and PRD §2.1).
+const DEFAULT_MODEL_PREFIX: &str = "/usr/share/wintermute/models";
 
 /// Lifecycle channel capacity — capture.start/end/error events for a
 /// healthy daemon are sparse, so 32 is plenty.
 const LIFECYCLE_CAPACITY: usize = 32;
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> std::process::ExitCode {
+// ---------------------------------------------------------------------------
+// Subcommand dispatch
+// ---------------------------------------------------------------------------
+
+fn main() -> std::process::ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Determine subcommand.  With no args or "start", run the daemon.
+    let subcmd = args.get(1).map(String::as_str).unwrap_or("start");
+
+    match subcmd {
+        "start" | "--start" => run_daemon(),
+        "fetch-models" => run_fetch_models(&args[1..]),
+        "-h" | "--help" => {
+            print_help();
+            std::process::ExitCode::SUCCESS
+        }
+        unknown => {
+            eprintln!(
+                "wm-audio: unknown subcommand {unknown:?}\n\
+                 Use 'wm-audio --help' for usage."
+            );
+            std::process::ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::print_stdout)]
+fn print_help() {
+    println!(
+        "wm-audio — wintermute audio daemon\n\
+         \n\
+         SUBCOMMANDS:\n\
+           start           Start the daemon (default when no subcommand given)\n\
+           fetch-models    Download and install pretrained wake+VAD models\n\
+         \n\
+         FETCH-MODELS FLAGS:\n\
+           --prefix <dir>  Install root (default: {DEFAULT_MODEL_PREFIX})\n\
+           --force         Re-download even if models are already current\n\
+           --list          Print manifest without downloading (exit 0)\n\
+           --format <fmt>  Output format: text|json (default: text)\n\
+         \n\
+         DAEMON ENV (start):\n\
+           WM_MIC_NODE       PipeWire capture node (default: PW default)\n\
+           WM_WAKE_WORD      hey_jarvis|okay_nabu|hey_mycroft (default: hey_jarvis)\n\
+           WM_WAKE_THRESHOLD Float 0.0–1.0 (default: 0.6)\n\
+           WM_MIC_SOCK       UDS fanout socket path\n\
+           AGORABUS_SOCK     agorabus daemon socket\n\
+           WM_AUDIO_SESSION  Session id (default: wm-audio-<pid>)\n\
+           WM_PW_RECORD_BIN  pw-record binary path (default: pw-record)\n"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `fetch-models` subcommand
+// ---------------------------------------------------------------------------
+
+/// Parse and run the `fetch-models` subcommand.
+///
+/// `subcmd_args` is `&args[1..]` (i.e. includes "fetch-models" as [0]).
+fn run_fetch_models(subcmd_args: &[String]) -> std::process::ExitCode {
+    // --- parse flags -------------------------------------------------------
+    let mut prefix = PathBuf::from(DEFAULT_MODEL_PREFIX);
+    let mut force = false;
+    let mut list_only = false;
+    let mut format = OutputFormat::Text;
+
+    let mut i = 1; // skip "fetch-models"
+    while i < subcmd_args.len() {
+        match subcmd_args[i].as_str() {
+            "--prefix" => {
+                i += 1;
+                if i >= subcmd_args.len() {
+                    eprintln!("wm-audio fetch-models: --prefix requires a value");
+                    return std::process::ExitCode::from(1);
+                }
+                prefix = PathBuf::from(&subcmd_args[i]);
+            }
+            "--force" => {
+                force = true;
+            }
+            "--list" => {
+                list_only = true;
+            }
+            "--format" => {
+                i += 1;
+                if i >= subcmd_args.len() {
+                    eprintln!("wm-audio fetch-models: --format requires a value");
+                    return std::process::ExitCode::from(1);
+                }
+                match OutputFormat::parse(&subcmd_args[i]) {
+                    Ok(f) => format = f,
+                    Err(e) => {
+                        eprintln!("wm-audio fetch-models: {e}");
+                        return std::process::ExitCode::from(1);
+                    }
+                }
+            }
+            "-h" | "--help" => {
+                print_help();
+                return std::process::ExitCode::SUCCESS;
+            }
+            unknown => {
+                eprintln!("wm-audio fetch-models: unknown flag {unknown:?}");
+                return std::process::ExitCode::from(1);
+            }
+        }
+        i += 1;
+    }
+
+    // --- --list path -------------------------------------------------------
+    if list_only {
+        return do_list(&prefix, format);
+    }
+
+    // --- provision all models ----------------------------------------------
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "wm-audio-fetch-{}", std::process::id()
+    ));
+    if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
+        eprintln!("wm-audio fetch-models: cannot create temp dir: {e}");
+        return std::process::ExitCode::from(1);
+    }
+
+    let mut provenance = match read_provenance(&prefix) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("wm-audio fetch-models: cannot read existing provenance: {e}");
+            Vec::new()
+        }
+    };
+
+    let mut needs_privilege: Vec<(String, PathBuf, PathBuf)> = Vec::new();
+    let mut had_error = false;
+
+    for entry in MANIFEST {
+        let outcome = provision_one(entry, &prefix, &tmp_dir, force);
+        match outcome {
+            Ok(InstallOutcome::AlreadyCurrent) => {
+                eprintln!("fetch-models: {} already-current (skipped)", entry.name);
+            }
+            Ok(InstallOutcome::Installed) => {
+                eprintln!("fetch-models: {} installed ok", entry.name);
+                // Record provenance with the pinned sha256 (we already
+                // verified it in provision_one via download_to_tmp).
+                upsert_provenance(&mut provenance, entry, entry.sha256);
+            }
+            Ok(InstallOutcome::NeedsPrivilege { staged, target }) => {
+                eprintln!(
+                    "fetch-models: {} staged+verified but target not writable; needs privilege",
+                    entry.name
+                );
+                needs_privilege.push((entry.name.to_owned(), staged, target));
+            }
+            Err(e) => {
+                eprintln!("fetch-models: ERROR for {}: {e}", entry.name);
+                had_error = true;
+            }
+        }
+    }
+
+    // Write provenance for whatever was successfully installed.
+    if !provenance.is_empty() {
+        if let Err(e) = write_provenance(&prefix, &provenance) {
+            eprintln!("fetch-models: could not write MODELS.json: {e}");
+        }
+    }
+
+    // Clean up temp dir (best effort).
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    // Exit 2 when any model needs privilege.
+    if !needs_privilege.is_empty() {
+        eprintln!(
+            "\nfetch-models: some models could not be installed to {prefix:?} (not writable).",
+        );
+        eprintln!("Re-run with privilege:");
+        eprintln!("  sudo wm-audio fetch-models --prefix {}", prefix.display());
+        eprintln!("\nAlternatively use a user-writable prefix:");
+        eprintln!("  wm-audio fetch-models --prefix ~/.local/share/wintermute/models");
+        return std::process::ExitCode::from(2);
+    }
+
+    if had_error {
+        return std::process::ExitCode::from(1);
+    }
+
+    std::process::ExitCode::SUCCESS
+}
+
+/// Print the model list (--list flag).
+#[allow(clippy::print_stdout)]
+fn do_list(prefix: &PathBuf, format: OutputFormat) -> std::process::ExitCode {
+    let list = build_list(prefix);
+    match format {
+        OutputFormat::Text => {
+            println!("wm-audio model manifest (prefix: {})", prefix.display());
+            println!("{:<14} {:<5} {:<25} {}", "NAME", "KIND", "FILENAME", "LICENSE");
+            for e in &list {
+                println!(
+                    "{:<14} {:<5} {:<25} {}",
+                    e.name,
+                    e.kind.to_string(),
+                    e.filename,
+                    e.license
+                );
+            }
+        }
+        OutputFormat::Json => {
+            match serde_json::to_string_pretty(&list) {
+                Ok(s) => println!("{s}"),
+                Err(e) => {
+                    eprintln!("fetch-models --list: JSON error: {e}");
+                    return std::process::ExitCode::from(1);
+                }
+            }
+        }
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+// ---------------------------------------------------------------------------
+// Daemon subcommand (`start`)
+// ---------------------------------------------------------------------------
+
+fn run_daemon() -> std::process::ExitCode {
+    // Build a single-threaded tokio runtime for the daemon.
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("wm-audio: failed to build tokio runtime: {e}");
+            return std::process::ExitCode::from(1);
+        }
+    };
+
+    rt.block_on(daemon_main())
+}
+
+async fn daemon_main() -> std::process::ExitCode {
     let _ = init_tracing();
 
     let mut config = match Config::from_env() {
