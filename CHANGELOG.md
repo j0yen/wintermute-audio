@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.0 — 2026-05-30
+
+Adds `wm-audio fetch-models` subcommand and `src/models.rs` module that
+downloads, sha256-verifies, and installs the four pretrained ONNX models
+(3 microWakeWord wake-word + 1 Silero VAD) into
+`/usr/share/wintermute/models/{wake,vad}/`. Idempotent; writes provenance
+sidecar `MODELS.json`; exits 2 with a clear sudo hint when the default
+prefix is root-owned. Unblocks the `audio-inference` PRD by guaranteeing
+model files are present on disk.
+
 All notable changes to wintermute-audio are documented here. Format
 loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
