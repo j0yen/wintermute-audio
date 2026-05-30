@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.5.0 — 2026-05-30
+
+`wm-audio` v0.4.0 adds ONNX inference backends for wake-word detection
+(microWakeWord via `OnnxWakeDetector`) and VAD (Silero VAD v4 via
+`OnnxVadDetector`) behind the existing `WakeDetector` / `VadDetector`
+traits. Both backends fall back to null engines when models are absent,
+satisfying PRD AC7. 16 new lib tests; `cargo deny` clean (rustls, no
+openssl). See PRD-wintermute-audio-inference.
+
 ## v0.4.0 — 2026-05-30
 
 PRD-wintermute-audio-aec: acoustic echo cancellation — already shipped in v0.2.1.
