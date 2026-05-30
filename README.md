@@ -16,6 +16,13 @@ This is the **audio** component of Fleet 1 of the wintermute vision.
 
 ## Recent
 
+- **v0.4.0 (2026-05-29)** — ONNX inference backends land. `src/inference.rs`
+  adds `OnnxWakeDetector` (microWakeWord) and `OnnxVadDetector` (Silero VAD v4)
+  via `ort` 2.0. Both fall back to null engines when models are absent
+  (`wake_model_missing` / `vad_model_missing` log lines) so the daemon
+  always starts cleanly. 16 new lib tests; `cargo deny` clean (rustls, no
+  openssl). See PRD-wintermute-audio-inference.
+
 - **v0.3.0 (2026-05-30)** — `wm-audio fetch-models` subcommand ships.
   Downloads, sha256-verifies, and installs the four pretrained ONNX
   models (3 microWakeWord wake-word + 1 Silero VAD) into

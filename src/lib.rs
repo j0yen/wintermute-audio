@@ -22,8 +22,10 @@
 //!   integration tests can flip without raising real signals.
 //!
 //! Wake-word (`microWakeWord`) and VAD (`Silero`) ONNX inference plug
-//! in behind [`WakeDetector`] / [`VadDetector`] and remain follow-on
-//! PRD scope.
+//! in behind [`WakeDetector`] / [`VadDetector`] via the [`inference`]
+//! module (v0.4.0, PRD-wintermute-audio-inference). Both backends fall
+//! back to their null engines when models are absent so the daemon
+//! always starts cleanly.
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
@@ -32,6 +34,7 @@ pub mod daemon;
 pub mod errors;
 pub mod events;
 pub mod fanout;
+pub mod inference;
 pub mod models;
 pub mod source;
 pub mod state;
@@ -57,6 +60,7 @@ pub use models::{
     MANIFEST, build_list, dir_is_writable, is_current, provision_one, read_provenance,
     sha256_hex, upsert_provenance, write_provenance,
 };
+pub use inference::{OnnxVadDetector, OnnxWakeDetector, load_or_null_vad, load_or_null_wake};
 pub use state::{MuteReason, MuteState, Shutdown};
 pub use vad::{
     NullVadDetector, SPEECH_END_HANGOVER_MS, SpeechEdge, VAD_FRAME_MS, VAD_STRIDE_SAMPLES,
