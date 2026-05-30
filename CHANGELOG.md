@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.4.0 — 2026-05-30
+
+PRD-wintermute-audio-aec: acoustic echo cancellation — already shipped in v0.2.1.
+AEC probe, PipeWire config drop, install.sh integration, and lib.rs re-exports
+were integrated in prior tick; this tick confirms gates pass (87 tests green).
+
 ## v0.3.0 — 2026-05-30
 
 Adds `wm-audio fetch-models` subcommand and `src/models.rs` module that
