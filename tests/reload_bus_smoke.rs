@@ -56,6 +56,8 @@ async fn run_reload_lifecycle() -> Result<(), String> {
         socket_path: bus_sock.clone(),
         heartbeat_timeout: Duration::from_secs(60),
         broadcast_capacity: 1024,
+        drain_grace_ms: 200,
+        drain_resume_hint_ms: 3_000,
     };
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let (bus_shutdown_tx, bus_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -94,6 +96,7 @@ async fn run_reload_lifecycle() -> Result<(), String> {
         bus_socket: bus_sock.clone(),
         session_id: format!("wm-audio-reload-smoke-{}", std::process::id()),
         pw_record_bin: wintermute_audio::DEFAULT_PW_RECORD.to_owned(),
+        speech_end_silence_ms: wintermute_audio::SPEECH_SILENCE_MS_DEFAULT,
     };
 
     // 4. Enough frames that the daemon's main loop is still alive while
@@ -188,6 +191,8 @@ async fn run_reload_timing() -> Result<std::time::Duration, String> {
         socket_path: bus_sock.clone(),
         heartbeat_timeout: Duration::from_secs(60),
         broadcast_capacity: 1024,
+        drain_grace_ms: 200,
+        drain_resume_hint_ms: 3_000,
     };
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let (bus_shutdown_tx, bus_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -224,6 +229,7 @@ async fn run_reload_timing() -> Result<std::time::Duration, String> {
         bus_socket: bus_sock.clone(),
         session_id: session_id.clone(),
         pw_record_bin: wintermute_audio::DEFAULT_PW_RECORD.to_owned(),
+        speech_end_silence_ms: wintermute_audio::SPEECH_SILENCE_MS_DEFAULT,
     };
 
     // Long enough that the source task is still draining while we measure.

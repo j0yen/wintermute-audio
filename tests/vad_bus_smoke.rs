@@ -80,6 +80,8 @@ async fn run_speech_lifecycle() -> Result<(), String> {
         socket_path: bus_sock.clone(),
         heartbeat_timeout: Duration::from_secs(60),
         broadcast_capacity: 1024,
+        drain_grace_ms: 200,
+        drain_resume_hint_ms: 3_000,
     };
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let (bus_shutdown_tx, bus_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -117,6 +119,11 @@ async fn run_speech_lifecycle() -> Result<(), String> {
         bus_socket: bus_sock.clone(),
         session_id: format!("wm-audio-vad-smoke-{}", std::process::id()),
         pw_record_bin: wintermute_audio::DEFAULT_PW_RECORD.to_owned(),
+        // Use the legacy 500 ms hangover so the fixed-frame NullSource
+        // (50 × 320 samples = ~31 VAD windows) delivers enough silence
+        // before the source closes. The elder-friendly default (1 500 ms)
+        // needs ~47 silent windows — tested in vad.rs unit tests instead.
+        speech_end_silence_ms: 500,
     };
 
     // 4. NullSource frame math:
