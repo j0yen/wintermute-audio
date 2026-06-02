@@ -34,6 +34,7 @@ pub mod daemon;
 pub mod errors;
 pub mod events;
 pub mod fanout;
+pub mod features;
 pub mod inference;
 pub mod models;
 pub mod selftest;
@@ -60,6 +61,10 @@ pub use models::{
     InstallOutcome, ListEntry, ModelEntry, ModelError, ModelKind, OutputFormat, ProvenanceRecord,
     MANIFEST, build_list, dir_is_writable, is_current, provision_one, read_provenance,
     sha256_hex, upsert_provenance, write_provenance,
+};
+pub use features::{
+    MelFrontend, MelWindowBuffer, MEL_STRIDE_SAMPLES, MEL_WINDOW_SAMPLES, NUM_FRAMES,
+    NUM_MEL_BINS, mel_window,
 };
 pub use inference::{OnnxVadDetector, OnnxWakeDetector, load_or_null_vad, load_or_null_wake};
 pub use state::{MuteReason, MuteState, Shutdown};

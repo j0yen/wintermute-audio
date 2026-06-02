@@ -11,8 +11,9 @@ use crate::fanout;
 use crate::source::{MicSource, PcmFrame};
 use crate::state::{MuteReason, MuteState, Shutdown};
 use crate::vad::{NullVadDetector, SpeechEdge, VadDetector, VadEdgeTracker, VadWindow};
+use crate::features::MelWindowBuffer;
 use crate::wake::{
-    self, NullWakeDetector, WakeDetector, WakeOutcome, WakeSlot, WakeWindow,
+    self, NullWakeDetector, WakeDetector, WakeOutcome, WakeSlot,
 };
 
 use agorabus::Client;
@@ -264,7 +265,7 @@ impl<S: MicSource> Daemon<S> {
         //    in via the [`WakeDetector`] trait; the iter-7 default
         //    backend is [`NullWakeDetector`].
         let mut total_samples: u64 = 0;
-        let mut wake_window = WakeWindow::with_defaults();
+        let mut wake_window = MelWindowBuffer::with_defaults();
         let mut wake_was_active = mute.should_run_wake();
         let mut vad_window = VadWindow::with_defaults();
         let mut vad_tracker = VadEdgeTracker::with_defaults();
