@@ -36,6 +36,7 @@ pub mod events;
 pub mod fanout;
 pub mod inference;
 pub mod models;
+pub mod selftest;
 pub mod source;
 pub mod state;
 pub mod vad;

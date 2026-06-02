@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.0 — 2026-06-02
+
+Add `wm-audio selftest` subcommand: runtime voice-path diagnostic with fixture
+mode (scripted wake+VAD via in-process bus) and live mode (subscribes to running
+daemon). Verdicts: healthy | deaf: no-wake | deaf: no-speech-segment |
+unreachable: <reason>. Exit codes 0/1/2 mirror `agorabus doctor`. --format
+json|text. 10 new unit tests. Encodes the 2026-05-29 diagnostic session.
+
 ## v0.5.0 — 2026-05-30
 
 `wm-audio` v0.4.0 adds ONNX inference backends for wake-word detection

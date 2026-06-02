@@ -18,6 +18,7 @@ use wintermute_audio::{
     OutputFormat, SupervisedPwRecord, MANIFEST, build_list, provision_one, read_provenance,
     resolve_mic_node, run_aec_probe, upsert_provenance, write_provenance,
 };
+use wintermute_audio::selftest::run_selftest;
 
 /// Default model prefix (system install, matches wm-stt and PRD §2.1).
 const DEFAULT_MODEL_PREFIX: &str = "/usr/share/wintermute/models";
@@ -43,6 +44,10 @@ fn main() -> std::process::ExitCode {
             let subcmd_args = args.get(1..).unwrap_or(&[]);
             run_fetch_models(subcmd_args)
         }
+        "selftest" => {
+            let subcmd_args = args.get(1..).unwrap_or(&[]);
+            run_selftest(subcmd_args)
+        }
         "-h" | "--help" => {
             print_help();
             std::process::ExitCode::SUCCESS
@@ -65,12 +70,23 @@ fn print_help() {
          SUBCOMMANDS:\n\
            start           Start the daemon (default when no subcommand given)\n\
            fetch-models    Download and install pretrained wake+VAD models\n\
+           selftest        Diagnose the voice path (fixture or --live mode)\n\
          \n\
          FETCH-MODELS FLAGS:\n\
            --prefix <dir>  Install root (default: {DEFAULT_MODEL_PREFIX})\n\
            --force         Re-download even if models are already current\n\
            --list          Print manifest without downloading (exit 0)\n\
            --format <fmt>  Output format: text|json (default: text)\n\
+         \n\
+         SELFTEST FLAGS:\n\
+           --live [secs]   Live mode: listen to running daemon for SECS seconds\n\
+           --format <fmt>  Output format: text|json (default: text)\n\
+           --prefix <dir>  Model prefix (default: {DEFAULT_MODEL_PREFIX})\n\
+         \n\
+         SELFTEST EXIT CODES:\n\
+           0  healthy — all required events observed\n\
+           1  deaf — pipeline up but events never fired\n\
+           2  could-not-run — models absent / no daemon in --live mode\n\
          \n\
          DAEMON ENV (start):\n\
            WM_MIC_NODE       PipeWire capture node (default: PW default)\n\
