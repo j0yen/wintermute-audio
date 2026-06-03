@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.8.1 — 2026-06-03
+
+Regression fix (test-only): `wake_bus_smoke` integration tests (`wake_publishes_through_real_bus`,
+`wake_publish_within_two_hundred_ms_ac3`) drove `NullSource` with 50×320 = 16 000 samples — under
+one full mel window. The v0.7.0 mel front-end raised the daemon wake window to `MEL_WINDOW_SAMPLES`
+(30 240 samples) with a `MEL_STRIDE_SAMPLES` (2 560) advance, so `MelWindowBuffer::next_window()`
+never yielded, the scripted detector never reached its 3rd `process` call, and no `wm.audio.wake`
+event published. Sized the test frame count from the mel constants (`MEL_WINDOW_SAMPLES +
+2*MEL_STRIDE_SAMPLES`, ceil-div + margin) so ≥3 windows drain and the detector fires. No production
+code change; full suite green.
+
 ## v0.8.0 — 2026-06-03
 
 Implements PRD `earshot-vad-patience`: the VAD silence-hangover before
