@@ -16,6 +16,13 @@ This is the **audio** component of Fleet 1 of the wintermute vision.
 
 ## Recent
 
+- **v0.7.0 (2026-06-03)** — Mel-spectrogram front-end fixes wake-word detection.
+  `src/features.rs` produces `[1, 186, 40]` log-mel features (30 ms Hann window,
+  10 ms hop, 40 mel bins) matching the microWakeWord training preprocessor.
+  `OnnxWakeDetector` rewired to feed the correct shape with load-time contract
+  verification (AC1). Honest `fetch-models` manifest: dead upstream wake URLs
+  removed, real silero_vad v5.1 sha256 pinned (AC5). 124 lib tests green.
+
 - **v0.4.0 (2026-05-29)** — ONNX inference backends land. `src/inference.rs`
   adds `OnnxWakeDetector` (microWakeWord) and `OnnxVadDetector` (Silero VAD v4)
   via `ort` 2.0. Both fall back to null engines when models are absent
