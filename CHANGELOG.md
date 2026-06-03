@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.8.0 — 2026-06-03
+
+Implements PRD `earshot-vad-patience`: the VAD silence-hangover before
+`wm.audio.speech.end` is now configurable, with an elder-friendly 1500 ms
+default that tolerates mid-sentence pauses without cutting off the speaker.
+Set `WM_VAD_SILENCE_MS` to override; values are clamped to [300, 3000] ms.
+
 ## v0.7.0 — 2026-06-03
 
 Fix wake-word detection contract mismatch: add `src/features.rs` mel-spectrogram

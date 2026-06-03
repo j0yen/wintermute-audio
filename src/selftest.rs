@@ -375,6 +375,7 @@ pub async fn run_fixture_mode(
         bus_socket: bus_sock.clone(),
         session_id: format!("wm-audio-selftest-{}", std::process::id()),
         pw_record_bin: crate::DEFAULT_PW_RECORD.to_owned(),
+        speech_end_silence_ms: crate::config::SPEECH_SILENCE_MS_DEFAULT,
     };
 
     // 320 samples/frame × 300 frames = 96 000 samples.
