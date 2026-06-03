@@ -5,9 +5,11 @@
 //!   off stdout, and publishes them into the UDS fanout + agorabus event
 //!   surface. The supervisor respawns `pw-record` on exit with exponential
 //!   backoff so capture is a persistent service.
-//! - `fetch-models`: Downloads, checksum-verifies, and installs the four
-//!   pretrained ONNX models (3 microWakeWord + 1 Silero VAD) into the
-//!   model prefix. See PRD-rouse-wake-vad-models.md.
+//! - `fetch-models`: Downloads, checksum-verifies, and installs the
+//!   upstream-provisioned ONNX models (currently the Silero VAD model) into
+//!   the model prefix. Wake models are NOT fetched here — they come from the
+//!   local training pipeline (see `models` module docs and
+//!   `project_wintermute_wake_training`). See PRD-rouse-wake-vad-models.md.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -69,7 +71,8 @@ fn print_help() {
          \n\
          SUBCOMMANDS:\n\
            start           Start the daemon (default when no subcommand given)\n\
-           fetch-models    Download and install pretrained wake+VAD models\n\
+           fetch-models    Download and install upstream VAD model(s); wake\n\
+         \x20                  model comes from the local training pipeline\n\
            selftest        Diagnose the voice path (fixture or --live mode)\n\
          \n\
          FETCH-MODELS FLAGS:\n\

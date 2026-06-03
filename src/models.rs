@@ -1,11 +1,21 @@
 //! `wm-audio fetch-models` — model bundle provisioner.
 //!
-//! Downloads, checksum-verifies, and installs the four pretrained ONNX
-//! models that `wm-audio` expects on disk:
+//! Downloads, checksum-verifies, and installs the pretrained ONNX models
+//! that `wm-audio` provisions from upstream:
 //!
-//! * Three **microWakeWord** wake-word models (Apache-2.0):
-//!   `hey_jarvis`, `okay_nabu`, `hey_mycroft`.
-//! * One **Silero VAD** model (MIT): `silero_vad`.
+//! * One **Silero VAD** model (MIT): `silero_vad`, pinned by a real,
+//!   verified sha256 of the v5.1 release artifact.
+//!
+//! **Wake-word models are NOT provisioned by `fetch-models`.** The upstream
+//! microWakeWord `.onnx` release assets that the original manifest pointed
+//! at no longer exist (`kahrendt/microWakeWord` was renamed to
+//! `OHF-Voice/micro-wake-word` and the `okay_nabu_v0.1` release assets are
+//! gone — every wake URL 404s). Rather than ship dead URLs with fabricated
+//! hashes, the wake model is produced by the **local training pipeline**
+//! (`contrib/train-wintermute.sh`, see project note
+//! `project_wintermute_wake_training`) and installed to
+//! `<prefix>/wake/wintermute.onnx` out-of-band. `fetch-models --list` only
+//! shows entries that actually resolve (AC5).
 //!
 //! The download and install path is:
 //!
@@ -71,42 +81,27 @@ impl ModelEntry {
     }
 }
 
-/// Static manifest: four models, all pinned by URL + sha256.
+/// Static manifest: only entries that actually resolve are listed (AC5).
 ///
-/// microWakeWord models are sourced from the Home Assistant
-/// `openWakeWord` release channel (Apache-2.0).
-/// Silero VAD is sourced from Silero's GitHub release (MIT).
+/// Silero VAD is sourced from Silero's GitHub release (MIT), pinned by a
+/// real sha256 verified against the v5.1 `silero_vad.onnx` artifact.
+///
+/// The previously-listed three microWakeWord entries (`hey_jarvis`,
+/// `okay_nabu`, `hey_mycroft`) have been **removed**: their upstream URLs
+/// 404 (`kahrendt/microWakeWord` was renamed to `OHF-Voice/micro-wake-word`
+/// and the `okay_nabu_v0.1` release assets are gone) and their pinned
+/// hashes were placeholders that could never verify. The wake model is now
+/// supplied by the local training pipeline — see the module-level docs and
+/// `project_wintermute_wake_training`.
 pub static MANIFEST: &[ModelEntry] = &[
-    ModelEntry {
-        name: "hey_jarvis",
-        kind: ModelKind::Wake,
-        filename: "hey_jarvis.onnx",
-        url: "https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_v0.1/hey_jarvis_v0.1.onnx",
-        sha256: "8f6f86aa6bcacae36e58ec6949d30b11a3ec0ab1ab6f8e66ae1ecee2b5462ef5",
-        license: "Apache-2.0",
-    },
-    ModelEntry {
-        name: "okay_nabu",
-        kind: ModelKind::Wake,
-        filename: "okay_nabu.onnx",
-        url: "https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_v0.1/okay_nabu_v0.1.onnx",
-        sha256: "e4a2b9cb50e1ed2b8f8b96ae38d8abd69d2af6de4af5b2975ad45fc2a3d0e9c1",
-        license: "Apache-2.0",
-    },
-    ModelEntry {
-        name: "hey_mycroft",
-        kind: ModelKind::Wake,
-        filename: "hey_mycroft.onnx",
-        url: "https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_v0.1/hey_mycroft_v0.1.onnx",
-        sha256: "7a1c3e9d2f4b8a5e6c0d1f2e3b4a5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
-        license: "Apache-2.0",
-    },
     ModelEntry {
         name: "silero_vad",
         kind: ModelKind::Vad,
         filename: "silero_vad.onnx",
         url: "https://github.com/snakers4/silero-vad/raw/v5.1/src/silero_vad/data/silero_vad.onnx",
-        sha256: "6d7e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9a",
+        // Real sha256 of the v5.1 release artifact (verified by download
+        // + sha256sum on 2026-06-03; file is a 2.3 MB ONNX protobuf).
+        sha256: "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f",
         license: "MIT",
     },
 ];
@@ -501,20 +496,32 @@ mod tests {
     use std::path::PathBuf;
 
     // -----------------------------------------------------------------------
-    // AC2: manifest parse — four entries, kinds correct
+    // AC5: manifest is honest — only resolvable entries, no dead wake URLs.
+    //
+    // The dead microWakeWord wake entries were removed (404 upstream +
+    // placeholder hashes). The only provisioned entry is the real,
+    // verified silero_vad VAD model. The wake model comes from the local
+    // training pipeline, NOT from fetch-models.
     // -----------------------------------------------------------------------
     #[test]
-    fn manifest_has_four_entries() {
-        assert_eq!(MANIFEST.len(), 4, "expected 4 models in manifest");
+    fn manifest_has_only_resolvable_entries() {
+        assert_eq!(
+            MANIFEST.len(),
+            1,
+            "manifest should list only the single resolvable (silero_vad) entry"
+        );
     }
 
     #[test]
-    fn manifest_wake_count() {
+    fn manifest_lists_no_wake_entries() {
+        // Wake models are NOT provisioned by fetch-models — the upstream
+        // microWakeWord URLs 404. Listing zero wake entries is the honest
+        // state (AC5); the wake model ships via the local training pipeline.
         let wakes = MANIFEST
             .iter()
             .filter(|e| e.kind == ModelKind::Wake)
             .count();
-        assert_eq!(wakes, 3, "expected 3 wake-word models");
+        assert_eq!(wakes, 0, "no wake entries should be listed (all 404 upstream)");
     }
 
     #[test]
@@ -524,6 +531,38 @@ mod tests {
             .filter(|e| e.kind == ModelKind::Vad)
             .count();
         assert_eq!(vads, 1, "expected 1 VAD model");
+    }
+
+    #[test]
+    fn manifest_no_dead_kahrendt_urls() {
+        // Guard against re-introducing the renamed/removed upstream repo.
+        for e in MANIFEST {
+            assert!(
+                !e.url.contains("kahrendt/microWakeWord"),
+                "manifest must not point at the removed kahrendt/microWakeWord repo: {} -> {}",
+                e.name,
+                e.url
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_silero_vad_pinned() {
+        let vad = MANIFEST
+            .iter()
+            .find(|e| e.name == "silero_vad")
+            .expect("silero_vad entry present");
+        assert_eq!(vad.kind, ModelKind::Vad);
+        assert_eq!(vad.license, "MIT");
+        // The real, verified digest (not the old placeholder 6d7e0f1a…).
+        assert_eq!(
+            vad.sha256,
+            "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f"
+        );
+        assert!(
+            vad.url.contains("snakers4/silero-vad"),
+            "silero_vad must come from the snakers4/silero-vad release"
+        );
     }
 
     #[test]
@@ -716,7 +755,9 @@ mod tests {
     fn build_list_length() {
         let prefix = PathBuf::from("/usr/share/wintermute/models");
         let list = build_list(&prefix);
-        assert_eq!(list.len(), 4);
+        // Mirrors the honest manifest: only the resolvable silero_vad entry.
+        assert_eq!(list.len(), MANIFEST.len());
+        assert_eq!(list.len(), 1);
     }
 
     #[test]
