@@ -35,8 +35,28 @@ use tokio::time::timeout;
 
 use wintermute_audio::config::{Config, WakeWord};
 use wintermute_audio::daemon::Daemon;
+use wintermute_audio::features::{MEL_STRIDE_SAMPLES, MEL_WINDOW_SAMPLES};
 use wintermute_audio::source::NullSource;
 use wintermute_audio::wake::{WakeDetector, WakeOutcome};
+
+/// `NullSource` frame count that drains enough PCM through the daemon's
+/// [`wintermute_audio::features::MelWindowBuffer`] for the scripted detector
+/// to fire on its 3rd `process` call.
+///
+/// The v0.7.0 mel front-end sized the wake window at
+/// [`MEL_WINDOW_SAMPLES`] (30 240 samples / 1.89 s) advanced by
+/// [`MEL_STRIDE_SAMPLES`] (2 560 samples / 160 ms) — far larger than the old
+/// 1 280-sample window these tests were originally written against. Three
+/// complete windows therefore need
+/// `MEL_WINDOW_SAMPLES + 2 * MEL_STRIDE_SAMPLES` = 35 360 samples; with a
+/// 320-sample `NullSource` frame that is 110.5 frames. We round up and add
+/// margin so the detector reliably reaches call 3.
+const WAKE_SMOKE_FRAME_SIZE: usize = 320;
+const WAKE_SMOKE_FRAMES: usize = {
+    let needed = MEL_WINDOW_SAMPLES + 2 * MEL_STRIDE_SAMPLES;
+    // ceil-div by frame size, then a small margin for the warmup window.
+    needed.div_ceil(WAKE_SMOKE_FRAME_SIZE) + 20
+};
 
 fn tmp_path(tag: &str, ext: &str) -> PathBuf {
     let pid = std::process::id();
@@ -129,16 +149,16 @@ async fn run_wake_lifecycle() -> Result<(), String> {
         speech_end_silence_ms: wintermute_audio::SPEECH_SILENCE_MS_DEFAULT,
     };
 
-    // 4. NullSource frame math:
-    //    - Wake window is 1280 samples (80 ms at 16 kHz), stride=1280.
-    //    - NullSource emits 320 samples per frame.
-    //    - 50 frames = 16 000 samples = 12 complete wake windows + 640 trailing.
-    //    - ScriptedWake fires on its 3rd call so multiple windows have
-    //      drained through the loop before the event lands; both
-    //      NotDetected and Detected paths are exercised.
+    // 4. NullSource frame math (v0.7.0 mel front-end geometry):
+    //    - Wake window is MEL_WINDOW_SAMPLES (30 240 samples / 1.89 s),
+    //      advanced by MEL_STRIDE_SAMPLES (2 560 samples / 160 ms).
+    //    - NullSource emits WAKE_SMOKE_FRAME_SIZE (320) samples per frame.
+    //    - WAKE_SMOKE_FRAMES is sized to drain >=3 complete windows so the
+    //      detector reaches its 3rd `process` call; both NotDetected and
+    //      Detected paths are exercised before the event lands.
     let source = NullSource {
-        frames: 50,
-        frame_size: 320,
+        frames: WAKE_SMOKE_FRAMES,
+        frame_size: WAKE_SMOKE_FRAME_SIZE,
     };
     let daemon = Daemon::new(config, source).with_wake_detector(ScriptedWake {
         counter: AtomicUsize::new(0),
@@ -339,8 +359,8 @@ async fn run_wake_timing() -> Result<Duration, String> {
     };
 
     let source = NullSource {
-        frames: 50,
-        frame_size: 320,
+        frames: WAKE_SMOKE_FRAMES,
+        frame_size: WAKE_SMOKE_FRAME_SIZE,
     };
     let daemon = Daemon::new(config, source).with_wake_detector(detector);
     let daemon_task = tokio::spawn(async move { daemon.run().await });
