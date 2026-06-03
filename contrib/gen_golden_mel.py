@@ -12,18 +12,24 @@ the code under test.
 Provenance / scaling
 --------------------
 ``MicroFrontend.process_samples`` consumes 160-sample (10 ms) hops and emits a
-40-bin feature frame once warmed up. In this package the emitted ``features``
-are already **floats** (the C frontend's uint16 spectrogram divided down). The
-model is fed ``feature * 0.0390625`` (= 1/25.6); see microwakeword
-``data.py``/``inference.py`` (``spectrogram.astype(np.float32) * 0.0390625``).
-So the golden value is ``reference_float_feature * 0.0390625``.
+40-bin feature frame once warmed up. The pybind wrapper (``micro_features.cpp``)
+ALREADY applies the model's ``FLOAT32_SCALE = 0.0390625`` (= 1/25.6) to the
+raw uint16 spectrogram before returning ``out.features`` — i.e. each value is
+``uint16 * 0.0390625``, which is exactly what microwakeword ``data.py`` /
+``inference.py`` feed the model (``spectrogram.astype(np.float32) * 0.0390625``).
+So the golden value is ``out.features`` verbatim; it MUST NOT be scaled again.
+
+History note: a 2026-06 build tick wrote the golden as ``out.features * 0.0390625``
+— a **double scale** (the wrapper had already scaled once). That made every value
+~25.6× too small (~0.8 instead of ~21) and is the reason the bit-exact Rust
+``mel_window`` port initially mismatched the committed golden by ~25×. The golden
+was regenerated single-scaled once the Rust port proved bit-exact against the
+reference C frontend (uint16 match, 0 diff). Do not re-introduce the extra scale.
 
 IMPORTANT — do not "validate" the golden by checking that every value is an
-integer multiple of 0.0390625. It is NOT: the reference features are floats,
-so float*0.0390625 carries the float's fractional part. A 2026-06 build tick
-made exactly that wrong assumption and spent six ticks chasing a non-bug. This
-script is the authoritative provenance: run ``--verify`` and trust a bit-exact
-match over any divisibility heuristic.
+integer multiple of 0.0390625. It IS such a multiple by construction
+(``uint16 * 0.0390625``), but float rounding in the JSON round-trip can perturb
+the last bits. Run ``--verify`` and trust a bit-exact match over any heuristic.
 
 Usage
 -----
@@ -79,7 +85,10 @@ def _features() -> list[list[float]]:
         out = mf.process_samples(audio[i:i + HOP_BYTES])
         i += HOP_BYTES
         if out.features:
-            frames.append([f * FEATURE_SCALE for f in out.features])
+            # out.features is ALREADY uint16 * 0.0390625 (the pybind wrapper
+            # applied FLOAT32_SCALE). Take it verbatim — scaling again would
+            # double-scale (see the History note in the module docstring).
+            frames.append(list(out.features))
     # The reference emits one extra trailing frame; the trained window is the
     # first NUM_FRAMES. Cap to the documented geometry.
     return frames[:NUM_FRAMES]
@@ -90,8 +99,8 @@ def _payload(feats: list[list[float]]) -> dict:
         "description": (
             "Golden TFLM-microfrontend log-mel features for AC2 parity. Input "
             "is a 440 Hz sine at amplitude 8000, 30240 i16 samples @16kHz. "
-            "Features are the pymicro_features MicroFrontend float output "
-            "multiplied by 0.0390625 (= 1/25.6), matching "
+            "Features are the pymicro_features MicroFrontend output verbatim "
+            "(already uint16 * 0.0390625 = 1/25.6 inside the wrapper), matching "
             "microwakeword.data/inference scaling. dtype f32, shape [186,40]."
         ),
         "sample_rate": SAMPLE_RATE,
@@ -105,7 +114,7 @@ def _payload(feats: list[list[float]]) -> dict:
         "feature_scale": FEATURE_SCALE,
         "source": (
             "OHF-Voice/micro-wake-word pymicro_features.MicroFrontend "
-            "(process_samples streaming, float features * 0.0390625); "
+            "(process_samples streaming, features taken verbatim — already scaled); "
             "regenerate with contrib/gen_golden_mel.py"
         ),
         "features": feats,
