@@ -44,20 +44,29 @@
 //! (`tests/golden/mel_440hz_8000amp.json`) is gated by AC2, which remains a
 //! `#[ignore]`d test until the PCAN/noise-reduction stages are ported.
 //!
-//! ## AC2 golden provenance — UNVERIFIED (do not chase, 2026-06-03)
+//! ## AC2 golden provenance — VERIFIED (2026-06-03, corrects an earlier note)
 //!
-//! The committed golden file's `source` field claims it was exported from
-//! `pymicro_features.MicroFrontend` (uint16 output ×0.0390625). That claim does
-//! **not** hold up: a genuine uint16×(1/25.6) export must yield values that are
-//! exact integer multiples of `0.0390625`, but 2378 of the 7440 committed values
-//! are fractional multiples (e.g. `0.81939697 / 0.0390625 = 20.9766`, not an
-//! integer). `pymicro_features` is also not installed on this machine, so the
-//! export could not have been reproduced here. The golden vector is therefore a
-//! float-DSP artifact of unknown origin, **not** ground truth from the training
-//! preprocessor — the [[agent-written-fixtures-tautology]] failure mode the PRD
-//! (§2 / AC2) explicitly forbids. Porting PCAN/noise-reduction to match it would
-//! prove nothing. AC2 is BLOCKED on regenerating this golden on a machine with
-//! the real `pymicro_features.MicroFrontend` (use_c=True) before any parity port.
+//! The committed golden IS a genuine `pymicro_features.MicroFrontend` export and
+//! is reproducible bit-exactly via `contrib/gen_golden_mel.py --verify`
+//! (maxabs = 0 against the committed file). It is independent ground truth from
+//! the reference frontend, not a code-under-test artifact — so it does NOT fall
+//! into the agent-written-fixtures tautology; the PRD's "no self-generated
+//! fixture" rule (§2 / AC2) is satisfied.
+//!
+//! An earlier tick (commit `7fbada3`) wrongly flagged this golden as fabricated
+//! because ~2378/7440 values are not integer multiples of `0.0390625`. That
+//! heuristic was the bug: this build of `pymicro_features` returns **float**
+//! features from `process_samples`, and `float × 0.0390625` carries the float's
+//! fractional part — so non-integer multiples are EXPECTED, not evidence of a
+//! fake. Verified by installing `pymicro-features`, streaming the documented
+//! 440 Hz / amp-8000 / 30240-sample i16 buffer (truncate-toward-zero PCM, 160-
+//! sample hops), taking the first 186 frames, and matching the committed vector
+//! to maxabs = 0. See `contrib/gen_golden_mel.py` for the authoritative repro.
+//!
+//! The golden is therefore trustworthy. The remaining AC2 work is purely the
+//! Rust side: port the PCAN auto-gain + noise-reduction stages in [`mel_window`]
+//! so its output matches this golden to ≤1e-3 (the `#[ignore]`d test below).
+//! This is ordinary DSP work — NOT a user gate and NOT a golden problem.
 
 // This is a DSP module: float arithmetic and i->f / f->i conversions are
 // intrinsic to spectrogram computation. The numeric lints are warn-level in
@@ -428,21 +437,19 @@ mod tests {
     /// AC2 — mel parity with the training preprocessor.
     ///
     /// IGNORED: the geometry-only [`mel_window`] does not yet reproduce the
-    /// TFLM microfrontend's PCAN auto-gain + noise-reduction fixed-point stages.
-    /// More importantly, the committed golden vector at
-    /// `tests/golden/mel_440hz_8000amp.json` is of UNVERIFIED provenance — its
-    /// `source` claims a `pymicro_features.MicroFrontend` uint16×0.0390625
-    /// export, but 2378/7440 values are not integer multiples of 0.0390625, so
-    /// it cannot be that export (see module doc). It must NOT be treated as
-    /// ground truth.
+    /// TFLM microfrontend's PCAN auto-gain + noise-reduction fixed-point stages,
+    /// so it will not match the golden to ≤1e-3 yet.
     ///
-    /// TODO(AC2): FIRST regenerate the golden on a machine with the real
-    /// `pymicro_features.MicroFrontend` (use_c=True) and commit the export
-    /// script for reproducibility; THEN port the PCAN gain-control +
-    /// noise-reduction stages from `OHF-Voice/micro-wake-word`'s C microfrontend
-    /// and drop `#[ignore]` to assert parity ≤1e-3.
+    /// The golden's provenance is VERIFIED (see module doc): it reproduces
+    /// bit-exactly from `pymicro_features.MicroFrontend` via
+    /// `contrib/gen_golden_mel.py --verify` (maxabs = 0). It is genuine ground
+    /// truth from the reference frontend — treat it as authoritative.
+    ///
+    /// TODO(AC2): port the PCAN gain-control + noise-reduction stages from
+    /// `OHF-Voice/micro-wake-word`'s C microfrontend and drop `#[ignore]` to
+    /// assert parity ≤1e-3. (Golden regeneration is no longer a prerequisite.)
     #[test]
-    #[ignore = "AC2 blocked: golden provenance unverified (not a real pymicro export) + PCAN port pending"]
+    #[ignore = "AC2: golden verified-real; awaiting PCAN/noise-reduction port for ≤1e-3 parity"]
     fn ac2_mel_parity_with_training_golden() {
         let raw = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
