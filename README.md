@@ -16,6 +16,14 @@ This is the **audio** component of Fleet 1 of the wintermute vision.
 
 ## Recent
 
+- **AC2 mel parity (2026-06-03)** — `src/features.rs` is now a **bit-exact**
+  Rust port of the TFLM `audio_microfrontend` (`pymicro_features.MicroFrontend`):
+  fixed-point 512-pt real FFT, mel filterbank, noise reduction, PCAN auto-gain
+  and log-scale, all reproducing the reference C frontend's uint16 output
+  bit-for-bit. The AC2 golden parity test passes at maxabs 0 (≤1e-3). Also
+  fixed a double-scale bug in `contrib/gen_golden_mel.py` and regenerated the
+  golden single-scaled. (Implementation-only; not yet versioned/landed.)
+
 - **v0.7.0 (2026-06-03)** — Mel-spectrogram front-end fixes wake-word detection.
   `src/features.rs` produces `[1, 186, 40]` log-mel features (30 ms Hann window,
   10 ms hop, 40 mel bins) matching the microWakeWord training preprocessor.
