@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.7.0 — 2026-06-03
+
+Fix wake-word detection contract mismatch: add `src/features.rs` mel-spectrogram
+front-end producing `[186, 40]` log-mel features (30 ms Hann window, 10 ms hop,
+40 triangular mel bins, 125–7500 Hz) matching the `OHF-Voice/micro-wake-word`
+training preprocessor. Rewire `OnnxWakeDetector::process` to feed `[1, 186, 40]`
+f32 tensors instead of raw PCM `[1, 1280]`; add load-time shape-contract
+verification (AC1). Repair `fetch-models` manifest: remove 404 upstream wake
+URLs, pin real silero_vad v5.1 sha256 `2623a29…` (AC5). Add `MelWindowBuffer`
+ring buffer for mel-stride accumulation. 124 lib tests green.
+
 ## v0.6.0 — 2026-06-02
 
 Add `wm-audio selftest` subcommand: runtime voice-path diagnostic with fixture
