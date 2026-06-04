@@ -217,21 +217,20 @@ impl WakeDetector for OnnxWakeDetector {
 
 // ─── OnnxVadDetector ────────────────────────────────────────────────────────
 
-/// Recurrent state for one Silero VAD v4 session.
+/// Recurrent state for one Silero VAD v5.1 session.
 ///
-/// Silero VAD v4 uses a 2-layer LSTM; each state tensor has shape
-/// `[2, 1, 64]` → 128 elements for both `h` (hidden) and `c` (cell).
+/// Silero VAD v5.1 uses a single combined recurrent `state` tensor of shape
+/// `[2, 1, 128]` → 256 elements (v4's separate `h`/`c` `[2,1,64]` tensors
+/// were merged). The model takes `state` in and returns the updated `stateN`.
 #[derive(Clone)]
 struct SileroState {
-    h: Vec<f32>, // 128 elements, shape [2, 1, 64]
-    c: Vec<f32>, // 128 elements, shape [2, 1, 64]
+    state: Vec<f32>, // 256 elements, shape [2, 1, 128]
 }
 
 impl SileroState {
     fn zeros() -> Self {
         Self {
-            h: vec![0.0_f32; 128],
-            c: vec![0.0_f32; 128],
+            state: vec![0.0_f32; 256],
         }
     }
 }
@@ -295,15 +294,15 @@ impl VadDetector for OnnxVadDetector {
             return VadOutcome::Silence;
         }
         let floats = normalise_pcm(window);
-        // Silero VAD v4 input: float32 [1, 1, 512]
-        let input_tensor = match Tensor::<f32>::from_array(([1_usize, 1, VAD_WINDOW_SAMPLES], floats)) {
+        // Silero VAD v5.1 input: float32 [1, samples] (batch, samples).
+        let input_tensor = match Tensor::<f32>::from_array(([1_usize, VAD_WINDOW_SAMPLES], floats)) {
             Ok(t) => t,
             Err(e) => {
                 warn!(error = %e, "vad: could not build input tensor");
                 return VadOutcome::Silence;
             }
         };
-        // sr scalar: int64 — shape [1] to avoid ambiguous empty-array type.
+        // sr scalar: int64 — shape [1] (silero accepts the dynamic scalar dim).
         let sr_tensor = match Tensor::<i64>::from_array(([1_usize], vec![16_000_i64])) {
             Ok(t) => t,
             Err(e) => {
@@ -312,39 +311,28 @@ impl VadDetector for OnnxVadDetector {
             }
         };
 
-        // We need to hold the lock across the full run() call to satisfy the
-        // borrow checker: SessionOutputs<'s> borrows from the Session, so we
-        // must extract all output values (copies) before releasing the lock.
-        let (probability, new_h, new_c) = {
+        // Hold the lock across run(): SessionOutputs borrows the Session, so we
+        // extract output copies before releasing the lock.
+        let probability = {
             let mut inner = self
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-            let h_data = inner.state.h.clone();
-            let c_data = inner.state.c.clone();
-
-            // h and c: float32 [2, 1, 64]
-            let h_tensor = match Tensor::<f32>::from_array(([2_usize, 1, 64], h_data)) {
+            // Single combined recurrent state: float32 [2, 1, 128].
+            let state_data = inner.state.state.clone();
+            let state_tensor = match Tensor::<f32>::from_array(([2_usize, 1, 128], state_data)) {
                 Ok(t) => t,
                 Err(e) => {
-                    warn!(error = %e, "vad: could not build h tensor");
-                    return VadOutcome::Silence;
-                }
-            };
-            let c_tensor = match Tensor::<f32>::from_array(([2_usize, 1, 64], c_data)) {
-                Ok(t) => t,
-                Err(e) => {
-                    warn!(error = %e, "vad: could not build c tensor");
+                    warn!(error = %e, "vad: could not build state tensor");
                     return VadOutcome::Silence;
                 }
             };
 
             let outputs = match inner.session.run(ort::inputs![
                 "input" => input_tensor,
+                "state" => state_tensor,
                 "sr"    => sr_tensor,
-                "h"     => h_tensor,
-                "c"     => c_tensor,
             ]) {
                 Ok(o) => o,
                 Err(e) => {
@@ -353,41 +341,35 @@ impl VadDetector for OnnxVadDetector {
                 }
             };
 
-            // Extract all output values as copies so they don't borrow
-            // `outputs` (and thereby `inner.session`) past this block.
+            // `output` is a [1, 1] tensor (a probability), NOT a 0-D scalar —
+            // extract the tensor and take its first element (try_extract_scalar
+            // would fail here and silently yield 0.0; same trap as the wake head).
             let prob = outputs
                 .get("output")
-                .and_then(|v| v.try_extract_scalar::<f32>().ok())
+                .and_then(|v| {
+                    v.try_extract_tensor::<f32>()
+                        .ok()
+                        .and_then(|(_shape, data)| data.first().copied())
+                })
                 .unwrap_or(0.0_f32);
-            let hn: Option<Vec<f32>> = outputs.get("hn").and_then(|v| {
+            // Carry the updated recurrent state forward.
+            let new_state: Option<Vec<f32>> = outputs.get("stateN").and_then(|v| {
                 v.try_extract_tensor::<f32>()
                     .ok()
                     .map(|(_shape, data)| data.to_vec())
             });
-            let cn: Option<Vec<f32>> = outputs.get("cn").and_then(|v| {
-                v.try_extract_tensor::<f32>()
-                    .ok()
-                    .map(|(_shape, data)| data.to_vec())
-            });
-            // outputs and inner (session borrow) drop here.
             drop(outputs);
-
-            // Update recurrent state while we still hold the lock.
-            if let Some(ref h) = hn {
-                if h.len() == 128 {
-                    inner.state.h = h.clone();
+            if let Some(s) = new_state {
+                if s.len() == 256 {
+                    inner.state.state = s;
                 }
             }
-            if let Some(ref c) = cn {
-                if c.len() == 128 {
-                    inner.state.c = c.clone();
-                }
-            }
-            (prob, hn, cn)
+            prob
         };
-        let _ = (new_h, new_c); // consumed for state update above; suppress unused warnings
 
-        if probability > 0.0_f32 {
+        // Silero emits a speech probability in [0, 1]; ~0.5 is the standard
+        // speech/silence boundary. The VadEdgeTracker debounces edges downstream.
+        if probability > 0.5_f32 {
             VadOutcome::Speech { probability }
         } else {
             VadOutcome::Silence

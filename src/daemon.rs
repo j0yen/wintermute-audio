@@ -154,6 +154,15 @@ impl<S: MicSource> Daemon<S> {
         self
     }
 
+    /// Swap in a VAD backend from an already-boxed `Arc<dyn VadDetector>`
+    /// (the entry point for [`crate::inference::load_or_null_vad`], which
+    /// returns either the ONNX detector or the null fallback).
+    #[must_use]
+    pub fn with_vad_detector_arc(mut self, detector: Arc<dyn VadDetector>) -> Self {
+        self.vad_detector = detector;
+        self
+    }
+
     /// Shared mute handle (for tests / inspection).
     #[must_use]
     pub fn mute(&self) -> MuteState {
@@ -279,7 +288,6 @@ impl<S: MicSource> Daemon<S> {
         //    backend is [`NullWakeDetector`].
         let mut total_samples: u64 = 0;
         let mut wake_window = MelWindowBuffer::with_defaults();
-        let mut wake_was_active = mute.should_run_wake();
         let mut vad_window = VadWindow::with_defaults();
         let mut vad_tracker = VadEdgeTracker::new(
             0.5,
@@ -354,26 +362,16 @@ impl<S: MicSource> Daemon<S> {
             // when nothing is listening — ignore.
             let _ = bcast_tx.send(frame);
 
-            // Drain the in-process ring into the wake window. On a
-            // TTS-mute edge, flush the buffer so the next inference
-            // does not run on stale audio from before un-mute.
+            // Drain the in-process ring into the wake + VAD windows.
             let avail = consumer.occupied_len();
             if avail > 0 {
-                let wake_active = mute.should_run_wake();
-                if wake_active && !wake_was_active {
-                    wake_window.clear();
-                }
-                wake_was_active = wake_active;
-
                 let mut scratch = vec![0_i16; avail];
                 let popped = consumer.pop_slice(&mut scratch);
                 scratch.truncate(popped);
-                if wake_active {
-                    wake_window.push(&scratch);
-                }
-                // VAD runs continuously while frames flow. Dialog-mute
-                // drops the frame upstream, so we only get here when
-                // PCM should be observed for speech boundaries.
+                // Wake ALWAYS listens — never gated by mute. The wake word
+                // must fire regardless of TTS/dialog state (per user directive);
+                // the old TTS/dialog mute gate could get stuck and kill wake.
+                wake_window.push(&scratch);
                 vad_window.push(&scratch);
             }
 
@@ -382,9 +380,7 @@ impl<S: MicSource> Daemon<S> {
             // hot-swap (PRD AC6) takes effect within one frame quantum.
             let active_detector = wake::read_slot(&wake_slot);
             while let Some(window) = wake_window.next_window() {
-                if !mute.should_run_wake() {
-                    continue;
-                }
+                // No mute gate: wake always runs (see push site above).
                 let WakeOutcome::Detected { confidence } = active_detector.process(&window)
                 else {
                     continue;

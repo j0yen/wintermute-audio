@@ -17,8 +17,9 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use wintermute_audio::{
     AecProbe, AudioEvent, Config, DEFAULT_PACTL, Daemon, InstallOutcome, MicNodeSelection,
-    OutputFormat, SupervisedPwRecord, MANIFEST, build_list, load_or_null_wake, provision_one,
-    read_provenance, resolve_mic_node, run_aec_probe, upsert_provenance, write_provenance,
+    OutputFormat, SupervisedPwRecord, MANIFEST, build_list, load_or_null_vad, load_or_null_wake,
+    provision_one, read_provenance, resolve_mic_node, run_aec_probe, upsert_provenance,
+    write_provenance,
 };
 use wintermute_audio::selftest::run_selftest;
 
@@ -384,10 +385,19 @@ async fn daemon_main() -> std::process::ExitCode {
         .join(format!("{wake_label}.onnx"));
     let wake_detector = load_or_null_wake(&wake_model_path, wake_label);
 
+    // Load the Silero VAD model the same way (was also never wired → the daemon
+    // ran NullVadDetector → no speech.start → STT/dialog never triggered). Falls
+    // back to the null engine if absent/unloadable.
+    let vad_model_path = PathBuf::from(DEFAULT_MODEL_PREFIX)
+        .join("vad")
+        .join("silero_vad.onnx");
+    let vad_detector = load_or_null_vad(&vad_model_path);
+
     let (life_tx, life_rx) = mpsc::channel::<AudioEvent>(LIFECYCLE_CAPACITY);
     let daemon = Daemon::new(config.clone(), build_supervisor(&config, selection, life_tx))
         .with_lifecycle_channel(life_rx)
-        .with_wake_detector_arc(wake_detector);
+        .with_wake_detector_arc(wake_detector)
+        .with_vad_detector_arc(vad_detector);
     let shutdown = daemon.shutdown_handle();
     // Wire the daemon's shutdown handle into the supervisor (already
     // owned by it via SupervisedPwRecord::shutdown clone path below).
