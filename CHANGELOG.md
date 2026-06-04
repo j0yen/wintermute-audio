@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.9.0 — 2026-06-04
+
+Bit-exact mel front-end: the wake detector now feeds the model `[1, 186, 40]`
+log-mel features (AC1 shape contract, verified against the ONNX graph's declared
+input dims), produced by a TFLM `micro_features` microfrontend port that matches
+the training preprocessor byte-for-byte (AC2 mel parity, maxabs=0 vs the golden
+vector exported from `contrib/wintermute-train`). Replaces the original `[1, 1280]`
+raw-PCM path that could never have fired against a real microWakeWord model.
+AC3 (held-out clip) and AC6 (live mic) remain PENDING-USER per the no-self-fixture
+rule — this version makes the plumbing bit-exact, not the model deploy-quality.
+
 ## v0.8.1 — 2026-06-03
 
 Regression fix (test-only): `wake_bus_smoke` integration tests (`wake_publishes_through_real_bus`,
