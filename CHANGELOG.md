@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.10.0 — 2026-06-04
+
+End-to-end custom `wintermute` wake word. `WM_WAKE_WORD=wintermute` now
+parses to the new `WakeWord::Wintermute` enum variant (config.rs), with
+`as_label` → `"wintermute"` and the unknown-word error listing it; all
+pre-existing wake words still parse. The `fetch-models` manifest carries a
+`wintermute` wake entry, and `contrib/train-wintermute.sh` documents the
+offline microWakeWord training pipeline (`--help`/`--smoke`) that produces
+the installable `wintermute.onnx`. Detection runs through the bit-exact
+`[1, 186, 40]` mel front-end shipped in v0.9.0. 140 tests green; `cargo
+deny check bans licenses sources` clean. ACs 2–6 (real model asset /
+recorded-utterance / training-run) remain asset- and human-gated per the
+PRD's no-self-fixture rule.
+
 ## v0.9.0 — 2026-06-04
 
 Bit-exact mel front-end: the wake detector now feeds the model `[1, 186, 40]`

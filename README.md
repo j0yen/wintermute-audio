@@ -16,6 +16,16 @@ This is the **audio** component of Fleet 1 of the wintermute vision.
 
 ## Recent
 
+- **v0.10.0 (2026-06-04)** — Custom **`wintermute`** wake word, end-to-end.
+  `WM_WAKE_WORD=wintermute` parses to the new `WakeWord::Wintermute` variant
+  (the house answers to its own name); all stock wake words still parse. The
+  `fetch-models` manifest gains a `wintermute` entry, and
+  `contrib/train-wintermute.sh` documents the offline microWakeWord training
+  pipeline (`--help` / `--smoke`) that produces the installable
+  `wintermute.onnx`. Detection runs through the bit-exact `[1, 186, 40]` mel
+  front-end. Deploying a trained model and live-mic acceptance remain
+  asset-/human-gated.
+
 - **AC2 mel parity (2026-06-03)** — `src/features.rs` is now a **bit-exact**
   Rust port of the TFLM `audio_microfrontend` (`pymicro_features.MicroFrontend`):
   fixed-point 512-pt real FFT, mel filterbank, noise reduction, PCAN auto-gain
@@ -140,8 +150,15 @@ Start the daemon:
 
 ```
 wm-audio start                         # uses bootstrap env
-WM_WAKE_WORD=hey_jarvis wm-audio start # explicit wake word
+WM_WAKE_WORD=hey_jarvis wm-audio start # explicit stock wake word
+WM_WAKE_WORD=wintermute wm-audio start # custom "wintermute" wake word
 ```
+
+The `wintermute` wake word is trained offline via
+`contrib/train-wintermute.sh` (microWakeWord; `--help` documents the
+pipeline, `--smoke` runs a tiny end-to-end pass). Install the resulting
+`wintermute.onnx` under `<prefix>/wake/wintermute.onnx`; the daemon loads it
+through the same `[1, 186, 40]` mel front-end as the stock models.
 
 ## Hardware reality verification
 
