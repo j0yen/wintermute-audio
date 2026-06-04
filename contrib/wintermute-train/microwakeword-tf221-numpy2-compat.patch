@@ -1,0 +1,48 @@
+diff --git a/microwakeword/test.py b/microwakeword/test.py
+index 7052986..58bd153 100644
+--- a/microwakeword/test.py
++++ b/microwakeword/test.py
+@@ -388,7 +388,7 @@ def tflite_streaming_model_roc(
+ 
+     path = os.path.join(config["train_dir"], folder)
+     with open(os.path.join(path, accuracy_name), "wt") as fd:
+-        auc = np.trapz(y_coordinates, x_coordinates)
++        auc = np.trapezoid(y_coordinates, x_coordinates)
+         auc_string = "AUC {:.5f}".format(auc)
+         logging.info(auc_string)
+         fd.write(auc_string + "\n")
+diff --git a/microwakeword/train.py b/microwakeword/train.py
+index b1d42d3..9eb88e7 100644
+--- a/microwakeword/train.py
++++ b/microwakeword/train.py
+@@ -70,7 +70,7 @@ def validate_nonstreaming(config, data_processor, model, test_set):
+     metrics["ambient_false_positives_per_hour"] = 0
+     metrics["average_viable_recall"] = 0
+ 
+-    test_set_fp = result["fp"].numpy()
++    test_set_fp = np.asarray(result["fp"])
+ 
+     if data_processor.get_mode_size("validation_ambient") > 0:
+         (
+@@ -101,9 +101,9 @@ def validate_nonstreaming(config, data_processor, model, test_set):
+ 
+         # Other than the false positive rate, all other metrics are accumulated across
+         # both test sets
+-        all_true_positives = ambient_predictions["tp"].numpy()
+-        ambient_false_positives = ambient_predictions["fp"].numpy() - test_set_fp
+-        all_false_negatives = ambient_predictions["fn"].numpy()
++        all_true_positives = np.asarray(ambient_predictions["tp"])
++        ambient_false_positives = np.asarray(ambient_predictions["fp"]) - test_set_fp
++        all_false_negatives = np.asarray(ambient_predictions["fn"])
+ 
+         metrics["auc"] = ambient_predictions["auc"]
+         metrics["loss"] = ambient_predictions["loss"]
+@@ -151,7 +151,7 @@ def validate_nonstreaming(config, data_processor, model, test_set):
+ 
+         # Use trapezoid rule to estimate the area under the curve, then divide by 2.0 to get the average recall
+         average_viable_recall = (
+-            np.trapz(np.flip(y_coordinates), np.flip(x_coordinates)) / 2.0
++            np.trapezoid(np.flip(y_coordinates), np.flip(x_coordinates)) / 2.0
+         )
+ 
+         metrics["recall_at_no_faph"] = recall_at_no_faph

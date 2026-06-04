@@ -1,0 +1,24 @@
+# Generated / downloaded artifacts — never committed.
+# The harness is the source of truth; everything below is reproducible
+# by running install.sh + install_torch.sh + prefetch.sh + train-wintermute.sh.
+.venv/
+__pycache__/
+*.pyc
+*.log
+
+# Cloned upstream sources (fetched by prefetch.sh / setup).
+piper-sample-generator/
+microWakeWord-src/
+
+# Datasets, generated samples, feature mmaps, trained models, exports.
+generated_samples/
+negative_datasets/
+mit_rirs/
+out/
+out-smoke/
+*.wav
+*.tflite
+*.onnx
+*.onnx.sha256
+*.onnx.variant
+*.pt
