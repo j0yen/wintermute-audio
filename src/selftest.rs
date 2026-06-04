@@ -303,6 +303,10 @@ pub async fn run_fixture_mode(
         broadcast_capacity: 1024,
         drain_grace_ms: agorabus::DEFAULT_DRAIN_GRACE_MS,
         drain_resume_hint_ms: agorabus::DEFAULT_DRAIN_RESUME_HINT_MS,
+        // agorabus 0.9.0 added durable state; keep the selftest bus isolated
+        // to its own temp dir rather than touching ~/.cache/agorabus/state.json.
+        state_file: dir.join("state.json"),
+        state_flush_ms: agorabus::DEFAULT_STATE_FLUSH_MS,
     };
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let (bus_shutdown_tx, bus_shutdown_rx) = tokio::sync::oneshot::channel::<()>();

@@ -125,6 +125,18 @@ impl<S: MicSource> Daemon<S> {
         self
     }
 
+    /// Swap in a wake-word backend from an already-boxed `Arc<dyn WakeDetector>`.
+    ///
+    /// This is the entry point for [`crate::inference::load_or_null_wake`],
+    /// which returns either an ONNX-backed detector or the null fallback
+    /// boxed as a trait object — so the daemon can wire whichever it gets
+    /// without the caller knowing the concrete type.
+    #[must_use]
+    pub fn with_wake_detector_arc(self, detector: Arc<dyn WakeDetector>) -> Self {
+        wake::write_slot(&self.wake_slot, detector);
+        self
+    }
+
     /// Shared handle to the active wake-word backend (PRD AC6
     /// hot-swap target). Mutating the slot mid-run takes effect on the
     /// next window inference.

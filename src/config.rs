@@ -18,6 +18,10 @@ pub enum WakeWord {
     OkayNabu,
     /// "hey mycroft" — legacy compatibility.
     HeyMycroft,
+    /// "wintermute" — custom locally-trained micro-wake-word. This is the
+    /// only wake model actually present on disk (the three above had their
+    /// upstream assets 404'd); see `project_wintermute_wake_training`.
+    Wintermute,
 }
 
 impl WakeWord {
@@ -31,8 +35,9 @@ impl WakeWord {
             "hey_jarvis" | "hey-jarvis" | "hey jarvis" => Ok(Self::HeyJarvis),
             "okay_nabu" | "okay-nabu" | "okay nabu" => Ok(Self::OkayNabu),
             "hey_mycroft" | "hey-mycroft" | "hey mycroft" => Ok(Self::HeyMycroft),
+            "wintermute" => Ok(Self::Wintermute),
             other => Err(AudioError::Config(format!(
-                "unknown WM_WAKE_WORD={other:?}; expected hey_jarvis|okay_nabu|hey_mycroft"
+                "unknown WM_WAKE_WORD={other:?}; expected hey_jarvis|okay_nabu|hey_mycroft|wintermute"
             ))),
         }
     }
@@ -44,6 +49,7 @@ impl WakeWord {
             Self::HeyJarvis => "hey-jarvis",
             Self::OkayNabu => "okay-nabu",
             Self::HeyMycroft => "hey-mycroft",
+            Self::Wintermute => "wintermute",
         }
     }
 }
@@ -113,7 +119,8 @@ impl Config {
     /// Honored variables:
     ///
     /// * `WM_MIC_NODE` — capture device name (defaults to empty / PW default).
-    /// * `WM_WAKE_WORD` — `hey_jarvis|okay_nabu|hey_mycroft` (default `hey_jarvis`).
+    /// * `WM_WAKE_WORD` — `hey_jarvis|okay_nabu|hey_mycroft|wintermute`
+    ///   (default `wintermute` — the only wake model present on disk).
     /// * `WM_WAKE_THRESHOLD` — float `0.0..=1.0` (default `0.6`).
     /// * `WM_MIC_SOCK` — UDS path for PCM fanout (default
     ///   `$XDG_RUNTIME_DIR/wintermute/mic.sock`).
@@ -134,7 +141,7 @@ impl Config {
         let wake_word = std::env::var("WM_WAKE_WORD")
             .ok()
             .as_deref()
-            .map_or(Ok(WakeWord::HeyJarvis), WakeWord::parse)?;
+            .map_or(Ok(WakeWord::Wintermute), WakeWord::parse)?;
 
         let wake_threshold = match std::env::var("WM_WAKE_THRESHOLD") {
             Ok(s) => {
