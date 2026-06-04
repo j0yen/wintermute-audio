@@ -191,12 +191,20 @@ impl WakeDetector for OnnxWakeDetector {
                     return WakeOutcome::NotDetected;
                 }
             };
-            // Extract the first output as a scalar float32 confidence value.
-            // The extraction copies the float out; outputs is then dropped.
+            // Extract the confidence from the model's [1, 1] output tensor.
+            // NOTE: the output is a rank-2 [1,1] tensor, NOT a 0-D scalar, so
+            // `try_extract_scalar` ALWAYS fails here and silently yields 0.0 —
+            // which made the wake detector return NotDetected on every window
+            // and never fire, regardless of the model. Extract the tensor and
+            // take its first element instead.
             outputs
                 .iter()
                 .next()
-                .and_then(|(_k, v)| v.try_extract_scalar::<f32>().ok())
+                .and_then(|(_k, v)| {
+                    v.try_extract_tensor::<f32>()
+                        .ok()
+                        .and_then(|(_shape, data)| data.first().copied())
+                })
                 .unwrap_or(0.0_f32)
         };
         if confidence > 0.0_f32 {
