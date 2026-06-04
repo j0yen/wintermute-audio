@@ -47,10 +47,10 @@ config = {
     "positive_class_weight": [1],
     "negative_class_weight": [20],
     "learning_rates": lr,
-    "batch_size": 24 if SMOKE else 128,
-    "time_mask_max_size": [0] if SMOKE else [5],
-    "time_mask_count": [0] if SMOKE else [2],
-    "freq_mask_max_size": [0] if SMOKE else [5],
+    "batch_size": 24 if SMOKE else 64,  # 64 (was 128): halve peak RAM — 15GB/no-swap OOM'd at 128
+    "time_mask_max_size": [0] if SMOKE else [10],  # was 5: stronger SpecAugment (anti-overfit)
+    "time_mask_count": [0] if SMOKE else [3],       # was 2
+    "freq_mask_max_size": [0] if SMOKE else [7],    # was 5 (40 mel bins)
     "freq_mask_count": [0] if SMOKE else [2],
     "eval_step_interval": 50 if SMOKE else 500,
     # clip_duration_ms must yield a spectrogram_length divisible by the model

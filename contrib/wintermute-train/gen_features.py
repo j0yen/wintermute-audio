@@ -101,16 +101,18 @@ def build_positive_features(gen_dir, root, smoke):
                   random_split_seed=10, split_count=0.1)
     aug = Augmentation(
         augmentation_duration_s=3.2,
+        # Anti-overfit (real-voice retrain): stronger/broader augmentation so the
+        # model learns the word's invariants, not the few captured utterances.
         augmentation_probabilities={
-            "SevenBandParametricEQ": 0.1, "TanhDistortion": 0.1,
-            "PitchShift": 0.1, "BandStopFilter": 0.1, "AddColorNoise": 0.1,
+            "SevenBandParametricEQ": 0.3, "TanhDistortion": 0.2,
+            "PitchShift": 0.4, "BandStopFilter": 0.2, "AddColorNoise": 0.3,
             "AddBackgroundNoise": 0.75, "Gain": 1.0, "RIR": 0.5,
         },
         impulse_paths=[str(rir_dir)],
         background_paths=[str(rir_dir)],  # smoke: reuse RIRs as bg; full run adds audioset/fma
     )
     for split, split_name, rep, slide in [
-        ("training", "train", 2, 10),
+        ("training", "train", 8, 10),   # was 2: 4x more augmented variants per clip
         ("validation", "validation", 1, 10),
         ("testing", "test", 1, 1),
     ]:
