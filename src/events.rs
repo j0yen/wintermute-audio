@@ -4,6 +4,8 @@
 //! serializes to the JSON shapes documented in the table. Topic strings
 //! are interned in [`Topics`] so call sites can't drift.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use serde::{Deserialize, Serialize};
 
 /// Topic strings published on / subscribed from the bus.
@@ -101,6 +103,72 @@ impl Timestamp {
     }
 }
 
+/// A collision-resistant turn identifier minted at wake and propagated
+/// downstream through every event in the same spoken turn.
+///
+/// Format: `<unix_ms_hex>-<seq_hex>` where `seq_hex` is a
+/// process-global monotonic counter that distinguishes two wakes that
+/// land in the same millisecond. Both parts are zero-padded hex to keep
+/// the string lexicographically sortable and human-readable.
+///
+/// The field is **optional** in every envelope — events without a
+/// `turn_id` (legacy or from a daemon that hasn't yet adopted this PRD)
+/// remain valid; consumers MUST handle `None` gracefully.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TurnId(pub String);
+
+/// Global monotone counter for same-millisecond collision avoidance.
+static TURN_SEQ: AtomicU32 = AtomicU32::new(0);
+
+impl TurnId {
+    /// Mint a fresh, collision-resistant `TurnId`.
+    ///
+    /// Uses wall-clock milliseconds and a process-global counter so two
+    /// calls in the same millisecond produce distinct ids.
+    #[must_use]
+    pub fn mint() -> Self {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| {
+                let m = d.as_millis();
+                u64::try_from(m).unwrap_or(u64::MAX)
+            });
+        let seq = TURN_SEQ.fetch_add(1, Ordering::Relaxed);
+        Self(format!("{ms:013x}-{seq:04x}"))
+    }
+
+    /// Parse a `TurnId` from a string slice, returning `None` if the
+    /// format does not match `<hex>-<hex>`.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        let mut parts = s.splitn(2, '-');
+        let ms_part = parts.next()?;
+        let seq_part = parts.next()?;
+        // Validate both parts are non-empty hex strings.
+        if ms_part.is_empty()
+            || seq_part.is_empty()
+            || !ms_part.chars().all(|c| c.is_ascii_hexdigit())
+            || !seq_part.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        Some(Self(s.to_owned()))
+    }
+
+    /// Borrow the underlying string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for TurnId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// `wm.audio.wake` payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WakeDetected {
@@ -110,6 +178,10 @@ pub struct WakeDetected {
     pub confidence: f32,
     /// Emission timestamp.
     pub ts: Timestamp,
+    /// Turn identifier minted at this wake. Shared by all downstream
+    /// events in the same spoken turn. Optional for backward compat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<TurnId>,
 }
 
 /// `wm.audio.speech.start` payload.
@@ -117,6 +189,9 @@ pub struct WakeDetected {
 pub struct SpeechStart {
     /// Rising-edge timestamp.
     pub ts: Timestamp,
+    /// Turn identifier propagated from the triggering wake event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<TurnId>,
 }
 
 /// `wm.audio.speech.chunk` payload.
@@ -128,6 +203,9 @@ pub struct SpeechChunk {
     pub pcm_b64: String,
     /// Emission timestamp.
     pub ts: Timestamp,
+    /// Turn identifier propagated from the triggering wake event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<TurnId>,
 }
 
 /// `wm.audio.speech.end` payload.
@@ -137,6 +215,9 @@ pub struct SpeechEnd {
     pub duration_ms: u32,
     /// Falling-edge timestamp.
     pub ts: Timestamp,
+    /// Turn identifier propagated from the triggering wake event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<TurnId>,
 }
 
 /// `wm.audio.capture.start` payload.
@@ -338,6 +419,7 @@ mod tests {
             wake_word: "hey-jarvis".into(),
             confidence: 0.87,
             ts: Timestamp(42),
+            turn_id: None,
         });
         assert_eq!(ev.topic(), "wm.audio.wake");
         let v = ev.payload().ok();
@@ -346,6 +428,8 @@ mod tests {
         let conf = v["confidence"].as_f64().unwrap_or(-1.0);
         assert!((conf - 0.87).abs() < 1e-3, "round-trip lost confidence");
         assert_eq!(v["ts"], 42);
+        // No turn_id → field absent from serialized payload (backward compat).
+        assert!(v.get("turn_id").is_none(), "absent turn_id must not appear in JSON");
     }
 
     #[test]
@@ -354,11 +438,78 @@ mod tests {
             seq: 7,
             pcm_b64: "AAAA".into(),
             ts: Timestamp(100),
+            turn_id: None,
         });
         let v = ev.payload().ok().unwrap_or(serde_json::Value::Null);
         assert_eq!(v["seq"], 7);
         assert_eq!(v["pcm_b64"], "AAAA");
         assert_eq!(v["ts"], 100);
+    }
+
+    // ---- TurnId: AC1 (mint/parse, same-ms collision avoidance) ----
+
+    #[test]
+    fn turn_id_mint_is_parseable() {
+        let id = TurnId::mint();
+        let parsed = TurnId::parse(id.as_str());
+        assert!(parsed.is_some(), "minted id must round-trip through parse");
+        assert_eq!(parsed.as_ref().map(TurnId::as_str), Some(id.as_str()));
+    }
+
+    #[test]
+    fn turn_id_two_mints_differ() {
+        // Two ids minted back-to-back (same or adjacent ms) must be distinct
+        // because the seq counter increments.
+        let a = TurnId::mint();
+        let b = TurnId::mint();
+        assert_ne!(a, b, "two minted TurnIds must differ");
+    }
+
+    #[test]
+    fn turn_id_parse_rejects_garbage() {
+        assert!(TurnId::parse("").is_none());
+        assert!(TurnId::parse("no-dash-hex").is_none(), "non-hex part must be rejected");
+        assert!(TurnId::parse("-abc").is_none(), "empty ms part must be rejected");
+        assert!(TurnId::parse("abc-").is_none(), "empty seq part must be rejected");
+    }
+
+    #[test]
+    fn turn_id_display() {
+        let id = TurnId("0000000000001-0000".to_owned());
+        assert_eq!(format!("{id}"), "0000000000001-0000");
+    }
+
+    #[test]
+    fn wake_with_turn_id_serializes_field() {
+        let id = TurnId::mint();
+        let id_str = id.as_str().to_owned();
+        let ev = AudioEvent::Wake(WakeDetected {
+            wake_word: "wintermute".into(),
+            confidence: 0.99,
+            ts: Timestamp(1),
+            turn_id: Some(id),
+        });
+        let v = ev.payload().ok().unwrap_or(serde_json::Value::Null);
+        assert_eq!(v["turn_id"], id_str, "turn_id must appear when set");
+    }
+
+    #[test]
+    fn legacy_wake_payload_deserializes_without_turn_id() {
+        // AC5: a pre-PRD payload (no turn_id field) must still deserialize cleanly.
+        let raw = r#"{"wake_word":"hey-jarvis","confidence":0.9,"ts":100}"#;
+        let w: WakeDetected = serde_json::from_str(raw)
+            .expect("legacy wake payload (no turn_id) must deserialize");
+        assert!(w.turn_id.is_none(), "absent field must map to None");
+        assert_eq!(w.wake_word, "hey-jarvis");
+    }
+
+    #[test]
+    fn legacy_speech_end_payload_deserializes_without_turn_id() {
+        // AC5 for SpeechEnd — confirm backward compat for all speech events.
+        let raw = r#"{"duration_ms":500,"ts":200}"#;
+        let e: SpeechEnd = serde_json::from_str(raw)
+            .expect("legacy speech.end payload must deserialize");
+        assert!(e.turn_id.is_none());
     }
 
     #[test]
@@ -430,18 +581,21 @@ mod tests {
                 wake_word: "hey-jarvis".into(),
                 confidence: 0.5,
                 ts: Timestamp(0),
+                turn_id: None,
             })
             .topic(),
-            AudioEvent::SpeechStart(SpeechStart { ts: Timestamp(0) }).topic(),
+            AudioEvent::SpeechStart(SpeechStart { ts: Timestamp(0), turn_id: None }).topic(),
             AudioEvent::SpeechChunk(SpeechChunk {
                 seq: 0,
                 pcm_b64: String::new(),
                 ts: Timestamp(0),
+                turn_id: None,
             })
             .topic(),
             AudioEvent::SpeechEnd(SpeechEnd {
                 duration_ms: 0,
                 ts: Timestamp(0),
+                turn_id: None,
             })
             .topic(),
             AudioEvent::Mute { ts: Timestamp(0) }.topic(),

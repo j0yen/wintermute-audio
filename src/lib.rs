@@ -51,7 +51,7 @@ pub use daemon::{CapturedBytes, Daemon};
 pub use errors::AudioError;
 pub use events::{
     AudioErrorPayload, AudioEvent, CaptureEnd, CaptureStart, ControlEvent, MuteSource,
-    SpeechChunk, SpeechEnd, SpeechStart, Timestamp, Topics, WakeDetected,
+    SpeechChunk, SpeechEnd, SpeechStart, Timestamp, Topics, TurnId, WakeDetected,
     is_self_emitted_topic,
 };
 pub use source::{

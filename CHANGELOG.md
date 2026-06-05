@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.11.0 — 2026-06-05
+
+Turn-id spine (PRD lucid-turn-id, AC1/AC2/AC5 — wm-audio leg).
+
+- **`TurnId` type** in `events.rs`: collision-resistant `<unix_ms_hex>-<seq_hex>`
+  token backed by a process-global `AtomicU32` counter. `TurnId::mint()` mints
+  a fresh id; `TurnId::parse(s)` validates and round-trips; `Display` for
+  logging. No new dependencies.
+- **`WakeDetected`, `SpeechStart`, `SpeechChunk`, `SpeechEnd`** all gain
+  `turn_id: Option<TurnId>`. Field is `#[serde(skip_serializing_if = "Option::is_none")]`
+  so legacy consumers never see a null field.
+- **`daemon.rs`** mints a `TurnId` at each wake and propagates the same id onto
+  every `speech.start`, `speech.chunk`, and `speech.end` for that utterance.
+- **8 new tests**: `turn_id_mint_is_parseable`, `turn_id_two_mints_differ`,
+  `turn_id_parse_rejects_garbage`, `turn_id_display`,
+  `wake_with_turn_id_serializes_field`, `legacy_wake_payload_deserializes_without_turn_id`,
+  `legacy_speech_end_payload_deserializes_without_turn_id`, plus
+  `wake_payload_round_trip` extended to assert absent `turn_id` stays absent.
+  135 tests green.
+
 ## v0.10.0 — 2026-06-04
 
 End-to-end custom `wintermute` wake word. `WM_WAKE_WORD=wintermute` now

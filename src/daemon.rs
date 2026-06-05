@@ -4,7 +4,7 @@
 use crate::config::Config;
 use crate::errors::AudioError;
 use crate::events::{
-    AudioEvent, ControlEvent, SpeechChunk, SpeechEnd, SpeechStart, Timestamp, WakeDetected,
+    AudioEvent, ControlEvent, SpeechChunk, SpeechEnd, SpeechStart, Timestamp, TurnId, WakeDetected,
     is_self_emitted_topic,
 };
 use crate::fanout;
@@ -295,6 +295,9 @@ impl<S: MicSource> Daemon<S> {
             config.speech_end_silence_ms,
         );
         let mut chunk_seq: u64 = 0;
+        // Turn identifier minted at each wake, propagated to speech events
+        // for the same utterance. `None` until the first wake fires.
+        let mut current_turn_id: Option<TurnId> = None;
         loop {
             if shutdown.is_triggered() {
                 info!("shutdown requested, draining");
@@ -388,10 +391,13 @@ impl<S: MicSource> Daemon<S> {
                 if confidence < config.wake_threshold {
                     continue;
                 }
+                let tid = TurnId::mint();
+                current_turn_id = Some(TurnId(tid.0.clone()));
                 let ev = AudioEvent::Wake(WakeDetected {
                     wake_word: active_detector.label().to_owned(),
                     confidence,
                     ts: Timestamp::now(),
+                    turn_id: Some(tid),
                 });
                 publish_audio_event(&mut pub_client, &ev).await;
             }
@@ -407,6 +413,7 @@ impl<S: MicSource> Daemon<S> {
                         chunk_seq = 0;
                         let ev = AudioEvent::SpeechStart(SpeechStart {
                             ts: Timestamp::now(),
+                            turn_id: current_turn_id.as_ref().map(|t| TurnId(t.0.clone())),
                         });
                         publish_audio_event(&mut pub_client, &ev).await;
                     }
@@ -414,6 +421,7 @@ impl<S: MicSource> Daemon<S> {
                         let ev = AudioEvent::SpeechEnd(SpeechEnd {
                             duration_ms,
                             ts: Timestamp::now(),
+                            turn_id: current_turn_id.as_ref().map(|t| TurnId(t.0.clone())),
                         });
                         publish_audio_event(&mut pub_client, &ev).await;
                     }
@@ -429,6 +437,7 @@ impl<S: MicSource> Daemon<S> {
                         seq: chunk_seq,
                         pcm_b64,
                         ts: Timestamp::now(),
+                        turn_id: current_turn_id.as_ref().map(|t| TurnId(t.0.clone())),
                     });
                     chunk_seq = chunk_seq.saturating_add(1);
                     publish_audio_event(&mut pub_client, &ev).await;
