@@ -16,6 +16,15 @@ This is the **audio** component of Fleet 1 of the wintermute vision.
 
 ## Recent
 
+- **v0.11.0 (2026-06-05)** — **`TurnId` spine** (PRD lucid-turn-id).
+  A collision-resistant `<unix_ms_hex>-<seq_hex>` token is now minted at each
+  wake and propagated as an optional field onto `wm.audio.wake`,
+  `wm.audio.speech.start`, `wm.audio.speech.chunk`, and `wm.audio.speech.end`.
+  Downstream consumers (wm-stt, wm-dialog, wm-brain, wm-tts) can correlate
+  all events for a single spoken turn by id instead of guessing at wall-clock
+  timestamps. The field is serde-optional so legacy deserializers continue to
+  work. 135 tests green.
+
 - **v0.10.0 (2026-06-04)** — Custom **`wintermute`** wake word, end-to-end.
   `WM_WAKE_WORD=wintermute` parses to the new `WakeWord::Wintermute` variant
   (the house answers to its own name); all stock wake words still parse. The
