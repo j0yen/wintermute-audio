@@ -21,6 +21,7 @@ use wintermute_audio::{
     provision_one, read_provenance, resolve_mic_node, run_aec_probe, upsert_provenance,
     write_provenance,
 };
+use wintermute_audio::boot_time::run_boot_time;
 use wintermute_audio::selftest::run_selftest;
 
 /// Default model prefix (system install, matches wm-stt and PRD §2.1).
@@ -51,6 +52,10 @@ fn main() -> std::process::ExitCode {
             let subcmd_args = args.get(1..).unwrap_or(&[]);
             run_selftest(subcmd_args)
         }
+        "boot-time" => {
+            let subcmd_args = args.get(1..).unwrap_or(&[]);
+            run_boot_time(subcmd_args)
+        }
         "-h" | "--help" => {
             print_help();
             std::process::ExitCode::SUCCESS
@@ -75,6 +80,7 @@ fn print_help() {
            fetch-models    Download and install upstream VAD model(s); wake\n\
          \x20                  model comes from the local training pipeline\n\
            selftest        Diagnose the voice path (fixture or --live mode)\n\
+           boot-time       Print per-stage boot latency table from today's log\n\
          \n\
          FETCH-MODELS FLAGS:\n\
            --prefix <dir>  Install root (default: {DEFAULT_MODEL_PREFIX})\n\

@@ -29,6 +29,7 @@
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+pub mod boot_time;
 pub mod config;
 pub mod daemon;
 pub mod errors;
