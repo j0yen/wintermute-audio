@@ -89,9 +89,11 @@ fn print_help() {
            --format <fmt>  Output format: text|json (default: text)\n\
          \n\
          SELFTEST FLAGS:\n\
-           --live [secs]   Live mode: listen to running daemon for SECS seconds\n\
-           --format <fmt>  Output format: text|json (default: text)\n\
-           --prefix <dir>  Model prefix (default: {DEFAULT_MODEL_PREFIX})\n\
+           --live [secs]     Live mode: listen to running daemon for SECS seconds\n\
+           --emit            Publish wm.health.hearing envelope to the bus\n\
+           --format <fmt>    Output format: text|json (default: text)\n\
+           --prefix <dir>    Model prefix (default: {DEFAULT_MODEL_PREFIX})\n\
+           --bus-socket <p>  Bus socket (live / --emit; default: $AGORABUS_SOCK)\n\
          \n\
          SELFTEST EXIT CODES:\n\
            0  healthy — all required events observed\n\

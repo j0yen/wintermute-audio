@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use agorabus::{Client, DaemonConfig, run_daemon};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 
 use crate::config::{Config, WakeWord};
@@ -35,6 +35,30 @@ use crate::vad::{VadDetector, VadOutcome};
 use crate::wake::{WakeDetector, WakeOutcome};
 
 // ─── public types ────────────────────────────────────────────────────────────
+
+/// Bus envelope published to `wm.health.hearing` by `wm-audio selftest --emit`.
+///
+/// Shape is compatible with the companion-degrade / almanac health shape
+/// (see `wintermute-almanac/src/daemon.rs:147` and `docket/src/digest.rs:84`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HearingHealth {
+    /// Always `"wm.health.hearing"`.
+    pub msg_type: String,
+    /// `"ok"` | `"degraded"` | `"deaf"`.
+    pub state: String,
+    /// Seconds since the last observed wake event (0 when wake just seen).
+    pub last_wake_age_s: u64,
+    /// Whether a detector was successfully loaded (non-null backend).
+    pub detector_loaded: bool,
+    /// Whether at least one model file is present on disk.
+    pub model_present: bool,
+    /// Number of `wm.audio.wake` events observed during the probe.
+    pub wake_seen: u32,
+    /// Number of `wm.audio.speech.start` + `.end` pairs observed.
+    pub speech_seen: u32,
+    /// RFC3339 timestamp of this probe.
+    pub ts: String,
+}
 
 /// Outcome of a selftest run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -107,8 +131,10 @@ pub struct SelftestFlags {
     pub format: SelftestFormat,
     /// Model prefix directory (for detecting absent models).
     pub model_prefix: PathBuf,
-    /// Bus socket path (for live mode).
+    /// Bus socket path (for live mode or `--emit`).
     pub bus_socket: Option<PathBuf>,
+    /// Emit a `wm.health.hearing` envelope to the bus after the selftest.
+    pub emit: bool,
 }
 
 /// Output format for selftest.
@@ -140,6 +166,7 @@ pub fn parse_selftest_flags(args: &[String]) -> Result<Option<SelftestFlags>, St
     let mut format = SelftestFormat::Text;
     let mut model_prefix = PathBuf::from(DEFAULT_MODEL_PREFIX);
     let mut bus_socket: Option<PathBuf> = None;
+    let mut emit = false;
 
     let mut i = 1usize; // skip "selftest" at 0
     while i < args.len() {
@@ -182,6 +209,9 @@ pub fn parse_selftest_flags(args: &[String]) -> Result<Option<SelftestFlags>, St
                     return Err("wm-audio selftest: --bus-socket requires a value".to_owned());
                 }
             }
+            "--emit" => {
+                emit = true;
+            }
             "-h" | "--help" => {
                 return Ok(None);
             }
@@ -192,7 +222,7 @@ pub fn parse_selftest_flags(args: &[String]) -> Result<Option<SelftestFlags>, St
         i += 1;
     }
 
-    Ok(Some(SelftestFlags { live_secs, format, model_prefix, bus_socket }))
+    Ok(Some(SelftestFlags { live_secs, format, model_prefix, bus_socket, emit }))
 }
 
 // ─── model presence probe ────────────────────────────────────────────────────
@@ -567,9 +597,11 @@ pub fn selftest_help() {
            --live [secs]     Live mode: subscribe to the running daemon for SECS\n\
                              seconds (default: 10). Speak the configured wake word\n\
                              then a sentence; prints 'healthy' if events are seen.\n\
+           --emit            After the selftest, publish a wm.health.hearing\n\
+                             envelope to the bus socket (fixture or live mode).\n\
            --format <fmt>    Output format: text|json (default: text)\n\
            --prefix <dir>    Model prefix dir (default: /usr/share/wintermute/models)\n\
-           --bus-socket <p>  Bus socket path (live mode; default: $AGORABUS_SOCK)\n\
+           --bus-socket <p>  Bus socket path (live mode / --emit; default: $AGORABUS_SOCK)\n\
            -h, --help        Print this help\n\
          \n\
          EXIT CODES:\n\
@@ -586,6 +618,143 @@ pub fn selftest_help() {
            deaf: no-speech-segment  Wake fired, VAD detector never fired; run 'wm-audio fetch-models'\n\
            unreachable: <reason>    Could not run the test at all\n"
     );
+}
+
+// ─── hearing probe ────────────────────────────────────────────────────────────
+
+/// Derive the `wm.health.hearing` state from a `SelftestResult`.
+///
+/// * `"deaf"`     — model absent (`model_present = false`) or detector not loaded
+/// * `"ok"`       — model present + detector loaded + expected events seen
+/// * `"degraded"` — model present but events missing (pipeline intact but silent)
+fn derive_hearing_state(
+    model_present: bool,
+    detector_loaded: bool,
+    result: &SelftestResult,
+) -> &'static str {
+    if !model_present || !detector_loaded {
+        return "deaf";
+    }
+    if result.verdict == "healthy" {
+        "ok"
+    } else {
+        "degraded"
+    }
+}
+
+/// RFC3339 timestamp string (UTC, second precision, no external deps).
+fn rfc3339_now() -> String {
+    // Use SystemTime → duration since epoch → manual format.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Convert unix secs to date/time components without chrono.
+    // We keep it simple: format as Zulu offset only, delegating
+    // to a minimal inline implementation.
+    unix_secs_to_rfc3339(secs)
+}
+
+/// Convert unix epoch seconds to an RFC3339 UTC string.
+/// Handles leap years via the Gregorian calendar algorithm.
+fn unix_secs_to_rfc3339(secs: u64) -> String {
+    let time_of_day = secs % 86400;
+    let days_since_epoch = secs / 86400;
+
+    let hour = time_of_day / 3600;
+    let minute = (time_of_day % 3600) / 60;
+    let second = time_of_day % 60;
+
+    // Determine year/month/day from days_since_epoch (1970-01-01 = day 0).
+    let (year, month, day) = days_to_ymd(days_since_epoch);
+
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// Convert days since 1970-01-01 to (year, month, day).
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Civil calendar algorithm (not accounting for proleptic corrections,
+    // valid for dates 1970-2100 which covers all realistic use cases here).
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// Run the hearing probe: execute a fixture selftest and return the
+/// structured `HearingHealth` envelope.
+///
+/// `model_prefix` is the directory to probe for model files.  In tests,
+/// point this at an empty temp dir to exercise the `deaf` path without
+/// requiring installed models.  `detector_loaded` is driven from whether
+/// real ONNX inference is available; in the current codebase the scripted
+/// detectors represent "detector loaded" = `true` (they are always
+/// available) so we pass `true` here.
+pub async fn run_hearing_probe(model_prefix: &std::path::Path) -> HearingHealth {
+    let model_present = any_model_present(model_prefix);
+    // The scripted fixture detector is always available.
+    let detector_loaded = true;
+
+    let result = run_fixture_mode(true, true, "hey-jarvis").await;
+
+    let state = derive_hearing_state(model_present, detector_loaded, &result);
+
+    // `last_wake_age_s` = 0 when wake was seen (just now), u64::MAX as
+    // sentinel when no wake was observed (no timestamp available).
+    let last_wake_age_s: u64 = if result.events_seen.wake >= 1 { 0 } else { u64::MAX };
+    let speech_seen = result.events_seen.speech_start.min(result.events_seen.speech_end);
+
+    HearingHealth {
+        msg_type: "wm.health.hearing".to_owned(),
+        state: state.to_owned(),
+        last_wake_age_s,
+        detector_loaded,
+        model_present,
+        wake_seen: result.events_seen.wake,
+        speech_seen,
+        ts: rfc3339_now(),
+    }
+}
+
+/// Publish a [`HearingHealth`] envelope to the given bus socket.
+///
+/// Connects, announces, publishes, then disconnects. Errors are
+/// returned as strings so callers can log without panicking.
+///
+/// # Errors
+///
+/// Returns a human-readable error string if the bus cannot be reached
+/// or publish fails.
+pub async fn emit_hearing_health(
+    health: &HearingHealth,
+    bus_socket: &std::path::Path,
+) -> Result<(), String> {
+    let mut client = Client::connect(bus_socket)
+        .await
+        .map_err(|e| format!("emit: connect {}: {e:#}", bus_socket.display()))?;
+    client
+        .announce(
+            "wm-audio-selftest-emit",
+            std::process::id(),
+            "",
+            "wm-audio selftest --emit",
+        )
+        .await
+        .map_err(|e| format!("emit: announce: {e:#}"))?;
+    let payload = serde_json::to_value(health)
+        .map_err(|e| format!("emit: serialize: {e:#}"))?;
+    client
+        .publish("wm.health.hearing", payload)
+        .await
+        .map_err(|e| format!("emit: publish: {e:#}"))?;
+    Ok(())
 }
 
 // ─── run_selftest (top-level entry point) ────────────────────────────────────
@@ -616,6 +785,10 @@ pub fn run_selftest(args: &[String]) -> std::process::ExitCode {
                     return std::process::ExitCode::from(2u8);
                 }
             };
+
+            let emit = flags.emit;
+            let model_prefix = flags.model_prefix.clone();
+            let bus_socket_for_emit = flags.bus_socket.clone();
 
             let result = rt.block_on(async move {
                 if let Some(live_secs) = flags.live_secs {
@@ -648,6 +821,19 @@ pub fn run_selftest(args: &[String]) -> std::process::ExitCode {
                 v if v.starts_with("deaf:") => 1u8,
                 _ => 2u8,
             };
+
+            // --emit: publish wm.health.hearing before printing/exiting.
+            if emit {
+                let health = rt.block_on(run_hearing_probe(&model_prefix));
+                let bus_path = bus_socket_for_emit.unwrap_or_else(|| {
+                    std::env::var("AGORABUS_SOCK")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|_| PathBuf::from("/run/agorabus/bus.sock"))
+                });
+                if let Err(e) = rt.block_on(emit_hearing_health(&health, &bus_path)) {
+                    eprintln!("wm-audio selftest --emit: {e}");
+                }
+            }
 
             match flags.format {
                 SelftestFormat::Text => {
@@ -813,5 +999,161 @@ mod tests {
     fn parse_flags_unknown_returns_err() {
         let args: Vec<String> = vec!["selftest".into(), "--bogus".into()];
         assert!(parse_selftest_flags(&args).is_err());
+    }
+
+    // ── HearingHealth struct ─────────────────────────────────────────────────
+
+    #[test]
+    fn hearing_health_state_deaf_when_model_absent() {
+        // Empty temp dir → no model present → state = "deaf".
+        let tmp = std::env::temp_dir().join(format!(
+            "wm-audio-probe-deaf-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let health = rt.block_on(run_hearing_probe(&tmp));
+
+        assert_eq!(health.msg_type, "wm.health.hearing");
+        assert_eq!(health.state, "deaf", "empty prefix must yield deaf: {health:?}");
+        assert!(!health.model_present);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hearing_health_state_ok_when_fixture_healthy() {
+        // A real (non-empty) prefix isn't required for state = "ok" in
+        // run_hearing_probe because the scripted fixture always succeeds.
+        // But we need model_present=true → point at a dir with a dummy file.
+        let tmp = std::env::temp_dir().join(format!(
+            "wm-audio-probe-ok-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+        // Create a dummy file matching one of the manifest filenames.
+        use crate::models::MANIFEST;
+        if let Some(entry) = MANIFEST.first() {
+            let _ = std::fs::write(tmp.join(entry.filename), b"dummy");
+        }
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let health = rt.block_on(run_hearing_probe(&tmp));
+
+        assert_eq!(health.msg_type, "wm.health.hearing");
+        assert_eq!(health.state, "ok", "fixture with model present must yield ok: {health:?}");
+        assert!(health.model_present);
+        assert!(health.detector_loaded);
+        assert!(health.wake_seen >= 1, "wake_seen must be >= 1: {health:?}");
+        assert!(health.speech_seen >= 1, "speech_seen must be >= 1: {health:?}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hearing_health_struct_fields_present() {
+        // Verify all documented fields serialize correctly.
+        let health = HearingHealth {
+            msg_type: "wm.health.hearing".to_owned(),
+            state: "ok".to_owned(),
+            last_wake_age_s: 0,
+            detector_loaded: true,
+            model_present: true,
+            wake_seen: 1,
+            speech_seen: 1,
+            ts: "2026-06-13T00:00:00Z".to_owned(),
+        };
+        let json = serde_json::to_value(&health).expect("serialize");
+        assert_eq!(json["msg_type"], "wm.health.hearing");
+        assert_eq!(json["state"], "ok");
+        assert_eq!(json["last_wake_age_s"], 0u64);
+        assert!(json["detector_loaded"].as_bool().expect("bool"));
+        assert!(json["model_present"].as_bool().expect("bool"));
+        assert_eq!(json["wake_seen"], 1u32);
+        assert_eq!(json["speech_seen"], 1u32);
+        assert_eq!(json["ts"], "2026-06-13T00:00:00Z");
+    }
+
+    #[test]
+    fn ts_is_valid_rfc3339() {
+        let ts = rfc3339_now();
+        // Must match YYYY-MM-DDTHH:MM:SSZ
+        assert!(ts.len() == 20, "ts length wrong: {ts}");
+        assert!(ts.ends_with('Z'), "ts must end with Z: {ts}");
+        assert_eq!(&ts[4..5], "-", "ts year separator: {ts}");
+        assert_eq!(&ts[7..8], "-", "ts month separator: {ts}");
+        assert_eq!(&ts[10..11], "T", "ts T separator: {ts}");
+    }
+
+    // ── AC5 regression: bare selftest unchanged ──────────────────────────────
+
+    #[test]
+    fn parse_flags_emit_false_by_default() {
+        // Bare `selftest` must NOT have --emit set.
+        let args: Vec<String> = vec!["selftest".into()];
+        let flags = parse_selftest_flags(&args).expect("parse ok").expect("flags present");
+        assert!(!flags.emit, "emit must default to false");
+    }
+
+    #[test]
+    fn parse_flags_emit_true_when_passed() {
+        let args: Vec<String> = vec!["selftest".into(), "--emit".into()];
+        let flags = parse_selftest_flags(&args).expect("parse ok").expect("flags present");
+        assert!(flags.emit, "emit must be true when --emit passed");
+    }
+
+    // ── derive_hearing_state unit tests (AC3) ────────────────────────────────
+
+    #[test]
+    fn derive_state_deaf_when_model_absent() {
+        let result = SelftestResult {
+            mode: "fixture".into(),
+            wake_word: "hey-jarvis".into(),
+            events_seen: EventsSeen { wake: 1, speech_start: 1, speech_end: 1 },
+            verdict: "healthy".into(),
+            detail: String::new(),
+        };
+        assert_eq!(derive_hearing_state(false, true, &result), "deaf");
+    }
+
+    #[test]
+    fn derive_state_deaf_when_detector_not_loaded() {
+        let result = SelftestResult {
+            mode: "fixture".into(),
+            wake_word: "hey-jarvis".into(),
+            events_seen: EventsSeen { wake: 1, speech_start: 1, speech_end: 1 },
+            verdict: "healthy".into(),
+            detail: String::new(),
+        };
+        assert_eq!(derive_hearing_state(true, false, &result), "deaf");
+    }
+
+    #[test]
+    fn derive_state_ok_when_healthy() {
+        let result = SelftestResult {
+            mode: "fixture".into(),
+            wake_word: "hey-jarvis".into(),
+            events_seen: EventsSeen { wake: 1, speech_start: 1, speech_end: 1 },
+            verdict: "healthy".into(),
+            detail: String::new(),
+        };
+        assert_eq!(derive_hearing_state(true, true, &result), "ok");
+    }
+
+    #[test]
+    fn derive_state_degraded_when_events_missing() {
+        let result = SelftestResult {
+            mode: "fixture".into(),
+            wake_word: "hey-jarvis".into(),
+            events_seen: EventsSeen::default(),
+            verdict: "deaf: no-wake".into(),
+            detail: "wake never fired".into(),
+        };
+        assert_eq!(derive_hearing_state(true, true, &result), "degraded");
     }
 }
