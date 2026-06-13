@@ -16,7 +16,7 @@ use crate::wake::{
     self, NullWakeDetector, WakeDetector, WakeOutcome, WakeSlot,
 };
 
-use agorabus::Client;
+use agorabus::{ClaimGuard, Client};
 use base64::Engine as _;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer as _, Observer as _, Producer as _, Split as _};
@@ -73,6 +73,11 @@ pub struct Daemon<S: MicSource> {
     vad_detector: Arc<dyn VadDetector>,
     lifecycle_rx: Option<mpsc::Receiver<AudioEvent>>,
     captured_bytes: CapturedBytes,
+    /// Agorabus advisory claim held for the lifetime of this daemon process.
+    ///
+    /// Acquired during [`Daemon::run`] after the bus connects. `None` if the
+    /// bus was unreachable at startup (best-effort; daemon still runs).
+    claim_guard: Option<ClaimGuard>,
 }
 
 impl<S: MicSource> Daemon<S> {
@@ -94,6 +99,7 @@ impl<S: MicSource> Daemon<S> {
             vad_detector: Arc::new(NullVadDetector::new("null")),
             lifecycle_rx: None,
             captured_bytes: CapturedBytes::new(),
+            claim_guard: None,
         }
     }
 
@@ -192,6 +198,7 @@ impl<S: MicSource> Daemon<S> {
             vad_detector,
             mut lifecycle_rx,
             captured_bytes,
+            claim_guard: _initial_claim_guard,
         } = self;
 
         info!(
@@ -234,6 +241,60 @@ impl<S: MicSource> Daemon<S> {
             )
             .await
             .map_err(|e| AudioError::Bus(format!("announce sub: {e:#}")))?;
+        // 1b. Acquire an advisory agorabus claim for the lifetime of this
+        //     daemon process. The claim is best-effort: if the bus is down at
+        //     startup we log and continue — the daemon must not fail to start
+        //     just because it can't hold a claim.
+        //
+        //     `ClaimGuard::hold` takes ownership of a `Client`, so we open a
+        //     dedicated third connection here rather than sharing the pub or sub
+        //     client.
+        const CLAIM_PATH: &str = "agorabus://daemon/wm-audio";
+        const CLAIM_SESSION: &str = "wm-audio-claim";
+        const CLAIM_TTL_SECS: u64 = 30;
+        let claim_guard: Option<ClaimGuard> = match Client::connect(&config.bus_socket).await {
+            Err(e) => {
+                warn!(error = %e, "claim connect failed; daemon starts without claim");
+                None
+            }
+            Ok(mut claim_client) => {
+                match claim_client
+                    .announce(
+                        CLAIM_SESSION,
+                        std::process::id(),
+                        "",
+                        "wm-audio claim holder",
+                    )
+                    .await
+                {
+                    Err(e) => {
+                        warn!(error = %e, "claim announce failed; daemon starts without claim");
+                        None
+                    }
+                    Ok(_) => {
+                        match ClaimGuard::hold(
+                            claim_client,
+                            &config.bus_socket,
+                            CLAIM_SESSION,
+                            CLAIM_PATH,
+                            std::time::Duration::from_secs(CLAIM_TTL_SECS),
+                        )
+                        .await
+                        {
+                            Ok(guard) => {
+                                info!(path = CLAIM_PATH, "agorabus claim acquired");
+                                Some(guard)
+                            }
+                            Err(e) => {
+                                warn!(error = %e, path = CLAIM_PATH, "claim acquire failed; daemon starts without claim");
+                                None
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
         // Subscribe to TTS + dialog control surfaces.
         let prefixes = ["wm.tts.", "wm.dialog.", "wm.audio.reload"];
         for prefix in prefixes {
@@ -485,7 +546,17 @@ impl<S: MicSource> Daemon<S> {
             }
         }
 
-        // 8. Best-effort publish of shutdown notice (cosmetic; the
+        // 8. Release the agorabus advisory claim before shutdown notice so peers
+        //    see the claim drop before the shutdown event.
+        if let Some(guard) = claim_guard {
+            if let Err(e) = guard.release().await {
+                warn!(error = %e, "claim release on shutdown failed (best-effort)");
+            } else {
+                info!(path = CLAIM_PATH, "agorabus claim released");
+            }
+        }
+
+        // 9. Best-effort publish of shutdown notice (cosmetic; the
         //    bus client may already be torn down).
         let _ = pub_client
             .publish(
@@ -760,6 +831,18 @@ mod tests {
             wake::read_slot(&slot).label(),
             "hey-jarvis",
             "failed reload must leave the active detector untouched",
+        );
+    }
+
+    #[test]
+    fn daemon_claim_guard_starts_none() {
+        // A freshly constructed daemon has no claim guard — it is acquired
+        // during run() after the bus connects. This test verifies the initial
+        // state without requiring a live agorabus daemon.
+        let d = Daemon::new(test_config(), NullSource::default());
+        assert!(
+            d.claim_guard.is_none(),
+            "claim_guard must start as None before run()",
         );
     }
 
