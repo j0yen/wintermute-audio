@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.12.0 — 2026-06-13
+
+changeover-daemon-claims: wire wm-audio daemon to hold agorabus://daemon/wm-audio claim via ClaimGuard for lifetime of process
+
 ## v0.11.0 — 2026-06-05
 
 Turn-id spine (PRD lucid-turn-id, AC1/AC2/AC5 — wm-audio leg).
