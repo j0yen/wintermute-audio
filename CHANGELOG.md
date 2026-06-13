@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.13.0 — 2026-06-13
+
+pulse-hearing-probe: add --emit to wm-audio selftest publishing wm.health.hearing envelope
+
 ## v0.12.0 — 2026-06-13
 
 changeover-daemon-claims: wire wm-audio daemon to hold agorabus://daemon/wm-audio claim via ClaimGuard for lifetime of process
